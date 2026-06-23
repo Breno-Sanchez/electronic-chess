@@ -109,6 +109,18 @@ A arquitetura é composta por quatro blocos principais:
 
 ---
 
+## Matriz de reed switches
+
+<p align="center">
+  <img src="docs/assets/images/matriz-reed-switches-v2.svg" alt="Matriz 8x8 de reed switches com diodos" width="1000">
+</p>
+
+A matriz é formada por **8 colunas** e **8 linhas**, totalizando **64 casas**. Cada casa possui um reed switch em série com um diodo. Quando uma peça com ímã é posicionada sobre uma casa, o reed switch fecha e cria um caminho elétrico entre a coluna e a linha correspondentes.
+
+No exemplo destacado na figura, a ativação da **coluna D** e a leitura da **linha 5** indicam a casa **D5**. O mesmo princípio é aplicado às demais casas do tabuleiro.
+
+---
+
 ## Circuito de uma casa
 
 ```mermaid
@@ -137,29 +149,6 @@ A função de cada elemento é:
 | Diodo | Reduz caminhos indesejados de corrente entre linhas e colunas |
 | Linha/coluna | Permitem organizar eletricamente as casas do tabuleiro |
 | ESP32 | Lê os sinais digitais e processa o estado detectado |
-
----
-
-## Representação da matriz 8x8
-
-```mermaid
-flowchart TB
-    subgraph Board["Matriz do tabuleiro"]
-        A8["a8"] --- B8["b8"] --- C8["c8"] --- D8["d8"] --- E8["e8"] --- F8["f8"] --- G8["g8"] --- H8["h8"]
-        A7["a7"] --- B7["b7"] --- C7["c7"] --- D7["d7"] --- E7["e7"] --- F7["f7"] --- G7["g7"] --- H7["h7"]
-        A6["a6"] --- B6["b6"] --- C6["c6"] --- D6["d6"] --- E6["e6"] --- F6["f6"] --- G6["g6"] --- H6["h6"]
-        A5["a5"] --- B5["b5"] --- C5["c5"] --- D5["d5"] --- E5["e5"] --- F5["f5"] --- G5["g5"] --- H5["h5"]
-        A4["a4"] --- B4["b4"] --- C4["c4"] --- D4["d4"] --- E4["e4"] --- F4["f4"] --- G4["g4"] --- H4["h4"]
-        A3["a3"] --- B3["b3"] --- C3["c3"] --- D3["d3"] --- E3["e3"] --- F3["f3"] --- G3["g3"] --- H3["h3"]
-        A2["a2"] --- B2["b2"] --- C2["c2"] --- D2["d2"] --- E2["e2"] --- F2["f2"] --- G2["g2"] --- H2["h2"]
-        A1["a1"] --- B1["b1"] --- C1["c1"] --- D1["d1"] --- E1["e1"] --- F1["f1"] --- G1["g1"] --- H1["h1"]
-    end
-
-    style Board fill:#f8fafc,stroke:#334155,stroke-width:2px,color:#111827
-    style D5 fill:#bbf7d0,stroke:#15803d,stroke-width:3px,color:#111827
-```
-
-Cada casa da matriz corresponde a uma posição do tabuleiro. A validação física da matriz é feita conferindo o acionamento de cada reed switch com a aproximação da peça magnetizada.
 
 ---
 
@@ -245,6 +234,7 @@ flowchart TD
 │   ├── BOM.md
 │   ├── BOM.csv
 │   └── assets/
+│       └── images/
 ├── hardware/
 │   ├── schematics/
 │   └── stl/
@@ -261,6 +251,7 @@ Pastas principais:
 |---|---|
 | [`main/`](main/) | Código-fonte do firmware ESP-IDF |
 | [`docs/`](docs/) | Documentação auxiliar e lista de materiais |
+| [`docs/assets/images/`](docs/assets/images/) | Imagens e diagramas visuais do projeto |
 | [`hardware/schematics/`](hardware/schematics/) | Esquemáticos do circuito |
 | [`hardware/stl/`](hardware/stl/) | Arquivos mecânicos/STL |
 | [`scripts/`](scripts/) | Scripts auxiliares de build, flash e monitor |
