@@ -1,0 +1,12 @@
+#ifndef SERVER_H
+#define SERVER_H
+
+#include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+
+esp_err_t serverInit(QueueHandle_t sensorQueue, QueueHandle_t ledQueue);
+esp_err_t serverNetworkInit(void);
+void serverTask(void * parameters);
+
+#endif

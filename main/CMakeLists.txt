@@ -1,4 +1,19 @@
 idf_component_register(
-    SRCS "main.c"
+    SRCS
+        "main.c"
+        "led.c"
+        "sensor.c"
+        "server.c"
     INCLUDE_DIRS "."
+    REQUIRES
+        led_strip
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_http_client
+        esp_http_server
+        esp-tls
+        nvs_flash
+        wpa_supplicant
+        esp_driver_gpio
 )
