@@ -81,13 +81,188 @@ static esp_err_t setEapPassword(void);
 static esp_err_t initEnterpriseAuth(void);
 static void eventHandler(void * arg, esp_event_base_t base, int32_t id, void * data);
 static esp_err_t startHttpServer(void);
-static esp_err_t rootHandler(httpd_req_t * req);
-static esp_err_t api_leds_post_handler(httpd_req_t * req);
-static esp_err_t api_pgn_post_handler(httpd_req_t * req);
-static esp_err_t queryLichessBestMove(char bestMove[APP_MOVE_TEXT_LEN], const char * fen);
-static esp_err_t buildLichessUrl(const char * fen, char * url, size_t urlLen);
-static esp_err_t httpsGet(const char * url, char * response, size_t responseLen);
-static uint8_t parseBestMoveFromJson(const char * json, char bestMove[APP_MOVE_TEXT_LEN]);
+static esp_err_t rootHandler(httpd_req_t * req)
+{
+    char fen[FEN_TEXT_LEN];
+    char piece[STATE_TEXT_LEN];
+    char best[APP_MOVE_TEXT_LEN];
+    char legal[LEGAL_TEXT_LEN];
+    char cells[64] = {0};
+    char chunk[512];
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+
+    if (req == NULL)
+    {
+        return err;
+    }
+
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(1000U)) == pdPASS)
+    {
+        copyText(fen, sizeof(fen), stateFen);
+        copyText(piece, sizeof(piece), statePiece);
+        copyText(best, sizeof(best), stateBest);
+        copyText(legal, sizeof(legal), stateLegal);
+        (void)xSemaphoreGive(stateMutex);
+    }
+    else
+    {
+        copyText(fen, sizeof(fen), "LOCK_ERROR");
+        copyText(piece, sizeof(piece), "LOCK_ERROR");
+        copyText(best, sizeof(best), "-----");
+        copyText(legal, sizeof(legal), "-");
+    }
+
+    if ((fen[0] == '\0') || (strcmp(fen, "LOCK_ERROR") == 0))
+    {
+        copyText(fen, sizeof(fen), "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    }
+
+    {
+        int file = 0;
+        int rank = 7;
+
+        for (int i = 0; (fen[i] != '\0') && (fen[i] != ' '); i++)
+        {
+            char c = fen[i];
+
+            if (c == '/')
+            {
+                rank--;
+                file = 0;
+            }
+            else if ((c >= '1') && (c <= '8'))
+            {
+                file += (c - '0');
+            }
+            else
+            {
+                if ((file >= 0) && (file < 8) && (rank >= 0) && (rank < 8))
+                {
+                    cells[(rank * 8) + file] = c;
+                }
+
+                file++;
+            }
+        }
+    }
+
+    err = httpd_resp_set_type(req, "text/html; charset=utf-8");
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    httpd_resp_set_hdr(req, "Connection", "close");
+
+#define SEND_CHUNK(text) do { \
+        err = httpd_resp_sendstr_chunk(req, text); \
+        if (err != ESP_OK) { return err; } \
+    } while (0)
+
+    SEND_CHUNK(
+        "<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<meta http-equiv=\"refresh\" content=\"2\">"
+        "<title>Xadrez ESP32-S3</title>"
+        "<style>"
+        "body{font-family:Arial,sans-serif;background:#f4f4f9;margin:24px;color:#111}"
+        "h1{margin:0 0 16px 0;font-size:40px}"
+        ".layout{display:flex;gap:28px;align-items:flex-start;flex-wrap:wrap}"
+        ".board{display:grid;grid-template-columns:repeat(8,70px);grid-template-rows:repeat(8,70px);"
+        "border:4px solid #333;box-shadow:0 2px 12px #999;background:#222}"
+        ".sq{width:70px;height:70px;display:flex;align-items:center;justify-content:center;"
+        "font-size:46px;box-sizing:border-box;position:relative}"
+        ".light{background:#f0d9b5}.dark{background:#b58863}"
+        ".legal:after{content:\"\";width:18px;height:18px;border-radius:50%;background:#fff;"
+        "opacity:.9;position:absolute;box-shadow:0 0 5px #111}"
+        ".best{outline:5px solid #12b312;outline-offset:-5px;background:#77cc77!important}"
+        ".info{min-width:360px;max-width:760px;font-size:22px}"
+        ".box{background:#fff;padding:16px;margin:0 0 14px 0;border:1px solid #ccc;border-radius:8px}"
+        ".fen{font-family:monospace;word-break:break-all;font-size:16px}"
+        "</style></head><body>"
+        "<h1>Xadrez físico ESP32-S3</h1>"
+        "<div class=\"layout\"><div class=\"board\">"
+    );
+
+    for (int r = 7; r >= 0; r--)
+    {
+        for (int f = 0; f < 8; f++)
+        {
+            int idx = (r * 8) + f;
+            char pc = cells[idx];
+            char sq[3];
+            char extra[32] = "";
+            const char *piece_html = "";
+
+            sq[0] = (char)('a' + f);
+            sq[1] = (char)('1' + r);
+            sq[2] = '\0';
+
+            switch (pc)
+            {
+                case 'P': piece_html = "&#9817;"; break;
+                case 'N': piece_html = "&#9816;"; break;
+                case 'B': piece_html = "&#9815;"; break;
+                case 'R': piece_html = "&#9814;"; break;
+                case 'Q': piece_html = "&#9813;"; break;
+                case 'K': piece_html = "&#9812;"; break;
+                case 'p': piece_html = "&#9823;"; break;
+                case 'n': piece_html = "&#9822;"; break;
+                case 'b': piece_html = "&#9821;"; break;
+                case 'r': piece_html = "&#9820;"; break;
+                case 'q': piece_html = "&#9819;"; break;
+                case 'k': piece_html = "&#9818;"; break;
+                default: piece_html = ""; break;
+            }
+
+            if ((legal[0] != '-') && (strstr(legal, sq) != NULL))
+            {
+                strcat(extra, " legal");
+            }
+
+            if ((strlen(best) >= 4U) &&
+                (((best[0] == sq[0]) && (best[1] == sq[1])) ||
+                 ((best[2] == sq[0]) && (best[3] == sq[1]))))
+            {
+                strcat(extra, " best");
+            }
+
+            snprintf(
+                chunk,
+                sizeof(chunk),
+                "<div class=\"sq %s%s\">%s</div>",
+                (((r + f) % 2) == 0) ? "dark" : "light",
+                extra,
+                piece_html
+            );
+
+            SEND_CHUNK(chunk);
+        }
+    }
+
+    SEND_CHUNK("</div><div class=\"info\">");
+
+    snprintf(chunk, sizeof(chunk), "<div class=\"box\"><b>Peça:</b> %s</div>", piece);
+    SEND_CHUNK(chunk);
+
+    snprintf(chunk, sizeof(chunk), "<div class=\"box\"><b>FEN:</b><br><span class=\"fen\">%s</span></div>", fen);
+    SEND_CHUNK(chunk);
+
+    snprintf(chunk, sizeof(chunk), "<div class=\"box\"><b>Casas válidas:</b> %s</div>", legal);
+    SEND_CHUNK(chunk);
+
+    snprintf(chunk, sizeof(chunk), "<div class=\"box\"><b>Melhor jogada Lichess/Stockfish:</b> %s</div>", best);
+    SEND_CHUNK(chunk);
+
+    SEND_CHUNK("</div></div></body></html>");
+
+#undef SEND_CHUNK
+
+    return httpd_resp_sendstr_chunk(req, NULL);
+}
+
+
 static void updateState(const char * fen,
                         const char * piece,
                         const char * best,
@@ -99,7 +274,9 @@ static void buildOriginHintLedCommand(uint32_t sequence,
 static void buildBestMoveLedCommand(uint32_t sequence,
                                     const char bestMove[APP_MOVE_TEXT_LEN],
                                     led_command_t * command);
-static void buildClearLedCommand(uint32_t sequence, led_command_t * command);
+
+static esp_err_t api_leds_post_handler(httpd_req_t * req);
+static esp_err_t api_pgn_post_handler(httpd_req_t * req);
 
 static const httpd_uri_t rootUri = {
     .uri = "/",
@@ -278,6 +455,18 @@ static void eventHandler(void * arg, esp_event_base_t base, int32_t id, void * d
         {
             const ip_event_got_ip_t * const event = (const ip_event_got_ip_t *)data;
             ESP_LOGI(TAG, "ESP32 IP: " IPSTR, IP2STR(&event->ip_info.ip));
+
+        ESP_LOGI(TAG, "STA conectada. Iniciando servidor HTTP local...");
+        err = startHttpServer();
+
+        if (err == ESP_OK)
+        {
+            ESP_LOGI(TAG, "Abra o navegador em: http://192.168.4.1");
+        }
+        else
+        {
+            ESP_LOGE(TAG, "HTTP server start failed: %ld", (long)err);
+        }
         }
     }
 }
@@ -310,7 +499,6 @@ esp_err_t serverNetworkInit(void)
     if (err == ESP_OK)
     {
         copyStringToU8(staCfg.sta.ssid, sizeof(staCfg.sta.ssid), WIFI_SSID_TXT);
-        staCfg.sta.threshold.authmode = WIFI_AUTH_WPA2_ENTERPRISE;
 
         copyStringToU8(apCfg.ap.ssid, sizeof(apCfg.ap.ssid), SOFTAP_SSID_TXT);
         copyStringToU8(apCfg.ap.password, sizeof(apCfg.ap.password), SOFTAP_PASS_TXT);
@@ -336,7 +524,13 @@ esp_err_t serverNetworkInit(void)
     if (err == ESP_OK) err = initEnterpriseAuth();
     if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_AP, &apCfg);
     if (err == ESP_OK) err = esp_wifi_start();
-    if (err == ESP_OK) err = startHttpServer();
+    if (err == ESP_OK) err = esp_wifi_set_ps(WIFI_PS_NONE);
+
+    if (err == ESP_OK)
+    {
+        err = startHttpServer();
+    }
+
 
     if (err == ESP_OK)
     {
@@ -407,6 +601,9 @@ static esp_err_t startHttpServer(void)
     {
         httpd_config_t config = HTTPD_DEFAULT_CONFIG();
         config.stack_size = 12288U;
+        config.lru_purge_enable = true;
+        config.recv_wait_timeout = 5;
+        config.send_wait_timeout = 5;
 
         err = httpd_start(&httpServer, &config);
 
@@ -417,137 +614,6 @@ static esp_err_t startHttpServer(void)
         if (err == ESP_OK)
         {
             ESP_LOGI(TAG, "HTTP server started on port %u", (unsigned int)config.server_port);
-        }
-    }
-    return err;
-}
-
-static esp_err_t rootHandler(httpd_req_t * req)
-{
-    char html[LOCAL_HTML_BUF_LEN];
-    char fen[FEN_TEXT_LEN];
-    char piece[STATE_TEXT_LEN];
-    char best[APP_MOVE_TEXT_LEN];
-    char legal[LEGAL_TEXT_LEN];
-    char pgn[PGN_TEXT_LEN];
-    int len;
-    esp_err_t err = ESP_ERR_INVALID_ARG;
-
-    if (req != NULL)
-    {
-        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(1000U)) == pdPASS)
-        {
-            copyText(fen, sizeof(fen), stateFen);
-            copyText(piece, sizeof(piece), statePiece);
-            copyText(best, sizeof(best), stateBest);
-            copyText(legal, sizeof(legal), stateLegal);
-            copyText(pgn, sizeof(pgn), statePgn);
-            (void)xSemaphoreGive(stateMutex);
-        }
-        else
-        {
-            copyText(fen, sizeof(fen), "LOCK_ERROR");
-            copyText(piece, sizeof(piece), "LOCK_ERROR");
-            copyText(best, sizeof(best), "-----");
-            copyText(legal, sizeof(legal), "-");
-            copyText(pgn, sizeof(pgn), "LOCK_ERROR");
-        }
-
-        len = snprintf(
-            html,
-            sizeof(html),
-            "<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"UTF-8\">"
-            "<meta http-equiv=\"refresh\" content=\"2\">"
-            "<title>Xadrez ESP32</title>"
-            "<style>"
-            "body{font-family:Arial,sans-serif;background:#f4f4f9;margin:24px;color:#111}"
-            "h1{margin:0 0 16px 0}"
-            ".layout{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}"
-            ".board{display:grid;grid-template-columns:repeat(8,58px);grid-template-rows:repeat(8,58px);"
-            "border:3px solid #333;box-shadow:0 2px 12px #999}"
-            ".sq{width:58px;height:58px;display:flex;align-items:center;justify-content:center;"
-            "font-size:38px;position:relative;box-sizing:border-box}"
-            ".light{background:#f0d9b5}.dark{background:#b58863}"
-            ".legal:after{content:\"\";width:20px;height:20px;border-radius:50%%;background:#fff;"
-            "opacity:.88;position:absolute;box-shadow:0 0 6px #111}"
-            ".best{outline:5px solid #12b312;outline-offset:-5px;background:#77cc77!important}"
-            ".info{min-width:360px;max-width:760px}"
-            ".box{background:#fff;padding:14px;margin:0 0 12px 0;border:1px solid #ccc;border-radius:8px}"
-            ".fen,.pgn{font-family:monospace;word-break:break-all}"
-            ".legend span{display:inline-block;margin-right:14px}"
-            ".dot{display:inline-block;width:16px;height:16px;border-radius:50%%;background:#fff;border:1px solid #333;vertical-align:middle}"
-            ".green{display:inline-block;width:16px;height:16px;background:#77cc77;border:2px solid #12b312;vertical-align:middle}"
-            "</style></head><body>"
-            "<h1>Xadrez fisico ESP32</h1>"
-            "<div class=\"layout\"><div id=\"board\" class=\"board\"></div>"
-            "<div class=\"info\">"
-            "<div class=\"box\"><b>Peca:</b> <span id=\"piece\"></span></div>"
-            "<div class=\"box\"><b>FEN:</b><br><span id=\"fen\" class=\"fen\"></span></div>"
-            "<div class=\"box\"><b>PGN:</b><br><span id=\"pgn\" class=\"pgn\"></span></div>"
-            "<div class=\"box\"><b>Casas validas:</b> <span id=\"legal\"></span></div>"
-            "<div class=\"box\"><b>Melhor jogada Lichess:</b> <span id=\"best\"></span></div>"
-            "<div class=\"box legend\"><b>Legenda:</b><br>"
-            "<span><i class=\"dot\"></i> casa valida</span>"
-            "<span><i class=\"green\"></i> melhor jogada</span>"
-            "</div></div></div>"
-            "<script>"
-            "const fen='%s';"
-            "const legalText='%s';"
-            "const best='%s';"
-            "const piece='%s';"
-            "const pgnText='%s';"
-            "const symbols={P:'\\u2659',N:'\\u2658',B:'\\u2657',R:'\\u2656',Q:'\\u2655',K:'\\u2654',"
-            "p:'\\u265F',n:'\\u265E',b:'\\u265D',r:'\\u265C',q:'\\u265B',k:'\\u265A'};"
-            "const legalSet=new Set(legalText==='-'?[]:legalText.split(','));"
-            "const bestFrom=best.length>=4?best.substring(0,2):'';"
-            "const bestTo=best.length>=4?best.substring(2,4):'';"
-            "const cells={};"
-            "function parseFen(f){"
-            "let part=f.split(' ')[0];let rank=7;let file=0;"
-            "for(let i=0;i<part.length;i++){"
-            "let c=part[i];"
-            "if(c==='/'){rank--;file=0;}"
-            "else if(c>='1'&&c<='8'){file+=parseInt(c,10);}"
-            "else{let sq=String.fromCharCode(97+file)+(rank+1);cells[sq]=c;file++;}"
-            "}"
-            "}"
-            "function draw(){"
-            "parseFen(fen);"
-            "document.getElementById('fen').innerText=fen;"
-            "document.getElementById('legal').innerText=legalText;"
-            "document.getElementById('best').innerText=best;"
-            "document.getElementById('piece').innerText=piece;"
-            "document.getElementById('pgn').innerText=pgnText;"
-            "const b=document.getElementById('board');"
-            "for(let r=7;r>=0;r--){"
-            "for(let f=0;f<8;f++){"
-            "let sq=String.fromCharCode(97+f)+(r+1);"
-            "let d=document.createElement('div');"
-            "d.className='sq '+(((r+f)%%2===0)?'dark':'light');"
-            "if(legalSet.has(sq)){d.className+=' legal';}"
-            "if((sq===bestFrom)||(sq===bestTo)){d.className+=' best';}"
-            "d.innerText=symbols[cells[sq]]||'';"
-            "b.appendChild(d);"
-            "}"
-            "}"
-            "}"
-            "draw();"
-            "</script></body></html>",
-            fen,
-            legal,
-            best,
-            piece,
-            pgn
-        );
-
-        if ((len > 0) && ((size_t)len < sizeof(html)))
-        {
-            err = httpd_resp_set_type(req, "text/html");
-            if (err == ESP_OK) err = httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
-        }
-        else
-        {
-            err = httpd_resp_send_500(req);
         }
     }
     return err;
@@ -754,18 +820,6 @@ static void buildBestMoveLedCommand(uint32_t sequence, const char bestMove[APP_M
     }
 }
 
-static void buildClearLedCommand(uint32_t sequence, led_command_t * command)
-{
-    if (command != NULL)
-    {
-        command->sequence = sequence;
-        command->clear = 1U;
-        command->bestValid = 0U;
-        command->legalCount = 0U;
-        setSquare(command->bestFrom, 'a', '1');
-        setSquare(command->bestTo, 'a', '1');
-    }
-}
 
 // ==============================================================================
 // TASK PRINCIPAL: MOTOR DE XADREZ, INTEGRAÇÃO C/C++ E TRAVAMENTO DE ERRO

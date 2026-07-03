@@ -21,6 +21,7 @@ extern Peca tabuleiro[8][8];
 extern CorPeca turno_atual;
 extern char alvo_en_passant[3];
 extern char fenAtual[128];
+extern char pgn_atual[2048];
 
 void inicializar_tabuleiro(void);
 void inicializar_pgn(void);

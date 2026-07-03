@@ -1,5 +1,22 @@
 idf_component_register(
-    SRCS "main.c" "led.c" "sensor.c" "server.c" "Jogo.cpp" "Fen_PGN.cpp" "valida_jogada.cpp"
+    SRCS
+        "main.c"
+        "led.c"
+        "sensor.c"
+        "server.c"
+        "Jogo.cpp"
+        "Fen_PGN.cpp"
+        "valida_jogada.cpp"
     INCLUDE_DIRS "."
-    PRIV_REQUIRES led_strip esp_http_server
+    PRIV_REQUIRES
+        led_strip
+        esp_driver_gpio
+        esp_http_server
+        esp_http_client
+        esp_wifi
+        esp_event
+        esp_netif
+        nvs_flash
+        mbedtls
+        wpa_supplicant
 )

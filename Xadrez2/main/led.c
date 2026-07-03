@@ -8,7 +8,7 @@
 #include "led.h"
 #include "led_strip.h"
 
-#define LED_STRIP_GPIO              (4)
+#define LED_STRIP_GPIO              (48)
 #define LED_STRIP_LED_COUNT         (150U)
 #define CHESSBOARD_LED_COUNT        (64U)
 
@@ -45,14 +45,6 @@ static uint8_t aplicar_intensidade(uint8_t valor_cor) {
     return (uint8_t)((valor_cor * led_intensity) / 100);
 }
 
-static esp_err_t setSquareColor(const char square[APP_SQUARE_TEXT_LEN], uint32_t red, uint32_t green, uint32_t blue) {
-    uint32_t index; esp_err_t err = ESP_FAIL;
-    if (squareToIndex(square, &index)) {
-        err = led_strip_set_pixel(ledStrip, index, aplicar_intensidade(red), aplicar_intensidade(green), aplicar_intensidade(blue));
-    }
-    return err;
-}
-
 void led_set_erro(const char* casa_origem, const char* casa_destino) {
     uint32_t idx1, idx2;
     if (squareToIndex(casa_origem, &idx1)) led_strip_set_pixel(ledStrip, idx1, 255, 0, 0);
@@ -73,7 +65,6 @@ esp_err_t ledInit(QueueHandle_t queue)
         .strip_gpio_num = LED_STRIP_GPIO,
         .max_leds = LED_STRIP_LED_COUNT,
         .led_model = LED_MODEL_WS2812,
-        .led_pixel_format = LED_PIXEL_FORMAT_GRB,
         .flags = {
             .invert_out = 0
         }
