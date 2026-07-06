@@ -1,7 +1,7 @@
 {
     "version":            "1.1",
     "project_name":       "xadrez_reed_s3_test",
-    "project_version":    "323766f-dirty",
+    "project_version":    "cd2e9fe-dirty",
     "project_path":       "/home/breno/Downloads/OI/Xadrez",
     "idf_path":           "/home/breno/esp/esp-idf",
     "build_dir":          "/home/breno/Downloads/OI/Xadrez/build",
