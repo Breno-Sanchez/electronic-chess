@@ -1,6 +1,8 @@
 #ifndef LED_H
 #define LED_H
 
+#include <stdint.h>
+
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"

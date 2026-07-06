@@ -262,3 +262,30 @@ void registrar_movimento_pgn(int lin_origem, int col_origem, int lin_destino, in
         numero_rodada++;
     }
 }
+
+
+bool xeque_mate() {
+    if (!xeque()) {
+        return false;
+    }
+
+    CorPeca cor_em_xeque = turno_atual;
+
+    for (int lo = 0; lo < 8; lo++) {
+        for (int co = 0; co < 8; co++) {
+            if (tabuleiro[lo][co].tipo == VAZIO || tabuleiro[lo][co].cor != cor_em_xeque) {
+                continue;
+            }
+
+            for (int ld = 0; ld < 8; ld++) {
+                for (int cd = 0; cd < 8; cd++) {
+                    if (validar_movimento(lo, co, ld, cd) && rei_salvo(lo, co, ld, cd)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    return true;
+}

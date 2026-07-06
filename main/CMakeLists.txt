@@ -12,11 +12,8 @@ idf_component_register(
         led_strip
         esp_driver_gpio
         esp_http_server
-        esp_http_client
         esp_wifi
         esp_event
         esp_netif
         nvs_flash
-        mbedtls
-        wpa_supplicant
 )

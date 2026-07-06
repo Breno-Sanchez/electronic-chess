@@ -28,6 +28,10 @@ void inicializar_pgn(void);
 bool validar_movimento(int lin_origem, int col_origem, int lin_destino, int col_destino);
 void mover_peca(int lin_origem, int col_origem, int lin_destino, int col_destino);
 void gerar_fen(void);
+bool casa_atacada(int lin_alvo, int col_alvo, CorPeca cor_atacante);
+bool xeque(void);
+bool rei_salvo(int lin_origem, int col_origem, int lin_destino, int col_destino);
+bool xeque_mate(void);
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,4 @@
-# Install script for directory: /home/breno/Downloads/OI/Xadrez/Xadrez2/main
+# Install script for directory: /home/breno/Downloads/OI/Xadrez/main
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)

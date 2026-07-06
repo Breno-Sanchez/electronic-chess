@@ -5,7 +5,7 @@
 
 #define APP_SQUARE_TEXT_LEN       (3U)
 #define APP_MOVE_TEXT_LEN         (6U)
-#define APP_MAX_LEGAL_MOVES       (8U)
+#define APP_MAX_LEGAL_MOVES       (32U)
 
 typedef enum
 {
@@ -23,12 +23,24 @@ typedef struct
 typedef struct
 {
     uint32_t sequence;
-    uint8_t clear;
+
+    uint8_t helpEnabled;
+    uint8_t blinkActive;
     uint8_t bestValid;
+    uint8_t invalidActive;
+    uint8_t checkActive;
+    uint8_t mateActive;
+    uint8_t winnerWhite;
+
     uint32_t legalCount;
+
     char legal[APP_MAX_LEGAL_MOVES][APP_SQUARE_TEXT_LEN];
     char bestFrom[APP_SQUARE_TEXT_LEN];
     char bestTo[APP_SQUARE_TEXT_LEN];
+    char blinkSquare[APP_SQUARE_TEXT_LEN];
+    char invalidFrom[APP_SQUARE_TEXT_LEN];
+    char invalidTo[APP_SQUARE_TEXT_LEN];
+    char checkSquare[APP_SQUARE_TEXT_LEN];
 } led_command_t;
 
 #endif

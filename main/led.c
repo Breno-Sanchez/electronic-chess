@@ -1,60 +1,103 @@
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
 #include "app_types.h"
+#include "chess_logic.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 #include "led.h"
 #include "led_strip.h"
 
-#define LED_STRIP_GPIO              (48)
-#define LED_STRIP_LED_COUNT         (150U)
-#define CHESSBOARD_LED_COUNT        (64U)
+#define LED_STRIP_GPIO              (20)
+#define USED_BOARD_LED_COUNT        (64U)
+#define SKIP_BETWEEN_FILES         (5U)
+#define PHYSICAL_FILE_STRIDE        (13U)
+#define LED_STRIP_LED_COUNT         (104U)
 
-uint8_t led_intensity = 80; 
-uint8_t color_hint_r = 32,  color_hint_g = 24,  color_hint_b = 0;   
-uint8_t color_best_r = 0,   color_best_g = 48,  color_best_b = 0;   
-uint8_t color_bg_r   = 0,   color_bg_g = 0,   color_bg_b = 2;     
-
-#define YELLOW_RED_VALUE            (color_hint_r)
-#define YELLOW_GREEN_VALUE          (color_hint_g)
-#define YELLOW_BLUE_VALUE           (color_hint_b)
-#define GREEN_RED_VALUE             (color_best_r)
-#define GREEN_GREEN_VALUE           (color_best_g)
-#define GREEN_BLUE_VALUE            (color_best_b)
-#define BACKGROUND_RED_VALUE        (color_bg_r)
-#define BACKGROUND_GREEN_VALUE      (color_bg_g)
-#define BACKGROUND_BLUE_VALUE       (color_bg_b)
 #define RMT_RESOLUTION_HZ           (10000000U)
 #define RMT_MEM_BLOCK_SYMBOLS       (64U)
 
+#define BLUE_R                      (0U)
+#define BLUE_G                      (18U)
+#define BLUE_B                      (55U)
+
+#define YELLOW_R                    (90U)
+#define YELLOW_G                    (68U)
+#define YELLOW_B                    (0U)
+
+#define GREEN_R                     (0U)
+#define GREEN_G                     (90U)
+#define GREEN_B                     (0U)
+
+#define RED_R                       (100U)
+#define RED_G                       (0U)
+#define RED_B                       (0U)
+
+#define BLINK_MS                    (300U)
+
 static const char * const TAG = "LED";
+
 static QueueHandle_t ledQueue = NULL;
 static led_strip_handle_t ledStrip = NULL;
 
-static uint8_t squareToIndex(const char square[APP_SQUARE_TEXT_LEN], uint32_t * index);
-static esp_err_t setBlueBackground(void);
-static esp_err_t applyCommand(const led_command_t * command);
+static uint8_t led_intensity = 80U;
+static led_command_t currentCommand;
+static uint8_t hasCommand = 0U;
+static uint8_t blinkPhase = 1U;
 
-void led_atualizar_config(uint8_t intensidade, uint8_t r, uint8_t g, uint8_t b) {
-    led_intensity = intensidade; color_best_r = r; color_best_g = g; color_best_b = b;
+static uint8_t squareToLedIndex(const char square[APP_SQUARE_TEXT_LEN], uint32_t * index);
+static esp_err_t clearAll(void);
+static esp_err_t setLedSquare(const char square[APP_SQUARE_TEXT_LEN], uint8_t r, uint8_t g, uint8_t b);
+static void squareFromLinCol(int lin, int col, char square[APP_SQUARE_TEXT_LEN]);
+static esp_err_t render(void);
+static void renderCheckX(void);
+static void renderMateSides(uint8_t winnerWhite);
+
+void led_atualizar_config(uint8_t intensidade, uint8_t r, uint8_t g, uint8_t b)
+{
+    (void)r;
+    (void)g;
+    (void)b;
+
+    if (intensidade > 100U)
+    {
+        intensidade = 100U;
+    }
+
+    led_intensity = intensidade;
 }
 
-static uint8_t aplicar_intensidade(uint8_t valor_cor) {
-    return (uint8_t)((valor_cor * led_intensity) / 100);
+void led_set_erro(const char* casa_origem, const char* casa_destino)
+{
+    currentCommand.invalidActive = 1U;
+
+    if (casa_origem != NULL)
+    {
+        strncpy(currentCommand.invalidFrom, casa_origem, APP_SQUARE_TEXT_LEN - 1U);
+        currentCommand.invalidFrom[APP_SQUARE_TEXT_LEN - 1U] = '\0';
+    }
+
+    if (casa_destino != NULL)
+    {
+        strncpy(currentCommand.invalidTo, casa_destino, APP_SQUARE_TEXT_LEN - 1U);
+        currentCommand.invalidTo[APP_SQUARE_TEXT_LEN - 1U] = '\0';
+    }
+
+    hasCommand = 1U;
+    (void)render();
 }
 
-void led_set_erro(const char* casa_origem, const char* casa_destino) {
-    uint32_t idx1, idx2;
-    if (squareToIndex(casa_origem, &idx1)) led_strip_set_pixel(ledStrip, idx1, 255, 0, 0);
-    if (squareToIndex(casa_destino, &idx2)) led_strip_set_pixel(ledStrip, idx2, 255, 0, 0);
-    led_strip_refresh(ledStrip);
-}
-
-void led_limpar_erro(void) {
-    setBlueBackground();
-    led_strip_refresh(ledStrip);
+void led_limpar_erro(void)
+{
+    currentCommand.invalidActive = 0U;
+    currentCommand.invalidFrom[0] = '\0';
+    currentCommand.invalidTo[0] = '\0';
+    (void)render();
 }
 
 esp_err_t ledInit(QueueHandle_t queue)
@@ -79,13 +122,14 @@ esp_err_t ledInit(QueueHandle_t queue)
         }
     };
 
+    memset(&currentCommand, 0, sizeof(currentCommand));
     ledQueue = queue;
 
     err = led_strip_new_rmt_device(&stripConfig, &rmtConfig, &ledStrip);
 
     if (err == ESP_OK)
     {
-        err = setBlueBackground();
+        err = clearAll();
     }
 
     if (err == ESP_OK)
@@ -93,70 +137,55 @@ esp_err_t ledInit(QueueHandle_t queue)
         err = led_strip_refresh(ledStrip);
     }
 
-    return err;
-}
-
-static uint8_t squareToIndex(const char square[APP_SQUARE_TEXT_LEN], uint32_t * index)
-{
-    uint8_t valid = 0U;
-    uint32_t file;
-    uint32_t rank;
-
-    if ((square != NULL) && (index != NULL))
-    {
-        if ((square[0] >= 'a') && (square[0] <= 'h') &&
-            (square[1] >= '1') && (square[1] <= '8'))
-        {
-            file = (uint32_t)((uint8_t)square[0] - (uint8_t)'a');
-            rank = (uint32_t)((uint8_t)square[1] - (uint8_t)'1');
-            *index = (rank * 8U) + file;
-
-            if (*index < CHESSBOARD_LED_COUNT)
-            {
-                valid = 1U;
-            }
-        }
-    }
-
-    return valid;
-}
-
-static esp_err_t setSquareColor(const char square[APP_SQUARE_TEXT_LEN],
-                                uint32_t red,
-                                uint32_t green,
-                                uint32_t blue)
-{
-    uint32_t index;
-    esp_err_t err = ESP_ERR_INVALID_ARG;
-
-    if (squareToIndex(square, &index) != 0U)
-    {
-        err = led_strip_set_pixel(
-            ledStrip,
-            index,
-            aplicar_intensidade((uint8_t)red),
-            aplicar_intensidade((uint8_t)green),
-            aplicar_intensidade((uint8_t)blue)
-        );
-    }
+    ESP_LOGI(TAG, "LED strip GPIO %d, count %u", LED_STRIP_GPIO, (unsigned int)LED_STRIP_LED_COUNT);
 
     return err;
 }
 
-static esp_err_t setBlueBackground(void)
+static uint8_t applyIntensity(uint8_t value)
+{
+    return (uint8_t)(((uint32_t)value * (uint32_t)led_intensity) / 100U);
+}
+
+static uint8_t squareToLedIndex(const char square[APP_SQUARE_TEXT_LEN], uint32_t * index)
+{
+    if ((square == NULL) || (index == NULL))
+    {
+        return 0U;
+    }
+
+    if ((square[0] < 'a') || (square[0] > 'h') ||
+        (square[1] < '1') || (square[1] > '8'))
+    {
+        return 0U;
+    }
+
+    uint32_t fileFromH = (uint32_t)('h' - square[0]);
+    uint32_t rank0 = (uint32_t)(square[1] - '1');
+    uint32_t base = fileFromH * PHYSICAL_FILE_STRIDE;
+    uint32_t offset;
+
+    if ((fileFromH % 2U) == 0U)
+    {
+        offset = rank0;
+    }
+    else
+    {
+        offset = 7U - rank0;
+    }
+
+    *index = base + offset;
+
+    return (*index < LED_STRIP_LED_COUNT) ? 1U : 0U;
+}
+
+static esp_err_t clearAll(void)
 {
     esp_err_t err = ESP_OK;
-    uint32_t index;
 
-    for (index = 0U; index < LED_STRIP_LED_COUNT; index++)
+    for (uint32_t i = 0U; i < LED_STRIP_LED_COUNT; i++)
     {
-        err = led_strip_set_pixel(
-            ledStrip,
-            index,
-            color_bg_r,
-            color_bg_g,
-            color_bg_b
-        );
+        err = led_strip_set_pixel(ledStrip, i, 0U, 0U, 0U);
 
         if (err != ESP_OK)
         {
@@ -167,86 +196,187 @@ static esp_err_t setBlueBackground(void)
     return err;
 }
 
-static esp_err_t applyCommand(const led_command_t * command)
+static esp_err_t setLedSquare(const char square[APP_SQUARE_TEXT_LEN], uint8_t r, uint8_t g, uint8_t b)
 {
-    esp_err_t err = ESP_ERR_INVALID_ARG;
-    uint32_t i;
+    uint32_t index;
 
-    if (command != NULL)
+    if (squareToLedIndex(square, &index) == 0U)
     {
-        err = setBlueBackground();
+        return ESP_ERR_INVALID_ARG;
+    }
 
-        if ((err == ESP_OK) && (command->clear == 0U))
+    return led_strip_set_pixel(
+        ledStrip,
+        index,
+        applyIntensity(r),
+        applyIntensity(g),
+        applyIntensity(b)
+    );
+}
+
+static void squareFromLinCol(int lin, int col, char square[APP_SQUARE_TEXT_LEN])
+{
+    square[0] = (char)('a' + col);
+    square[1] = (char)('8' - lin);
+    square[2] = '\0';
+}
+
+static void renderCheckX(void)
+{
+    const char * diagA[8] = {"a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8"};
+    const char * diagB[8] = {"a8", "b7", "c6", "d5", "e4", "f3", "g2", "h1"};
+
+    for (int i = 0; i < 8; i++)
+    {
+        (void)setLedSquare(diagA[i], RED_R, RED_G, RED_B);
+        (void)setLedSquare(diagB[i], RED_R, RED_G, RED_B);
+    }
+}
+
+static void renderMateRank(char rank, uint8_t r, uint8_t g, uint8_t b)
+{
+    char square[APP_SQUARE_TEXT_LEN];
+
+    for (char file = 'a'; file <= 'h'; file++)
+    {
+        square[0] = file;
+        square[1] = rank;
+        square[2] = '\0';
+        (void)setLedSquare(square, r, g, b);
+    }
+}
+
+static void renderMateSides(uint8_t winnerWhite)
+{
+    if (blinkPhase == 0U)
+    {
+        return;
+    }
+
+    if (winnerWhite != 0U)
+    {
+        renderMateRank('1', GREEN_R, GREEN_G, GREEN_B);
+        renderMateRank('2', GREEN_R, GREEN_G, GREEN_B);
+        renderMateRank('7', RED_R, RED_G, RED_B);
+        renderMateRank('8', RED_R, RED_G, RED_B);
+    }
+    else
+    {
+        renderMateRank('7', GREEN_R, GREEN_G, GREEN_B);
+        renderMateRank('8', GREEN_R, GREEN_G, GREEN_B);
+        renderMateRank('1', RED_R, RED_G, RED_B);
+        renderMateRank('2', RED_R, RED_G, RED_B);
+    }
+}
+
+static esp_err_t render(void)
+{
+    char square[APP_SQUARE_TEXT_LEN];
+    esp_err_t err;
+
+    if (ledStrip == NULL)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    err = clearAll();
+
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    for (int lin = 0; lin < 8; lin++)
+    {
+        for (int col = 0; col < 8; col++)
         {
-            for (i = 0U; i < command->legalCount; i++)
+            if (tabuleiro[lin][col].tipo != VAZIO)
             {
-                err = setSquareColor(
-                    command->legal[i],
-                    color_hint_r,
-                    color_hint_g,
-                    color_hint_b
-                );
-
-                if (err != ESP_OK)
-                {
-                    break;
-                }
+                squareFromLinCol(lin, col, square);
+                (void)setLedSquare(square, BLUE_R, BLUE_G, BLUE_B);
             }
-
-            if ((err == ESP_OK) && (command->bestValid != 0U))
-            {
-                err = setSquareColor(
-                    command->bestFrom,
-                    color_best_r,
-                    color_best_g,
-                    color_best_b
-                );
-            }
-
-            if ((err == ESP_OK) && (command->bestValid != 0U))
-            {
-                err = setSquareColor(
-                    command->bestTo,
-                    color_best_r,
-                    color_best_g,
-                    color_best_b
-                );
-            }
-        }
-
-        if (err == ESP_OK)
-        {
-            err = led_strip_refresh(ledStrip);
-        }
-
-        if (err == ESP_OK)
-        {
-            ESP_LOGI(TAG, "LED command applied, sequence %lu", (unsigned long)command->sequence);
         }
     }
 
-    return err;
+    if ((hasCommand != 0U) && (currentCommand.helpEnabled != 0U))
+    {
+        for (uint32_t i = 0U; i < currentCommand.legalCount; i++)
+        {
+            (void)setLedSquare(currentCommand.legal[i], YELLOW_R, YELLOW_G, YELLOW_B);
+        }
+
+        if (currentCommand.bestValid != 0U)
+        {
+            (void)setLedSquare(currentCommand.bestFrom, GREEN_R, GREEN_G, GREEN_B);
+            (void)setLedSquare(currentCommand.bestTo, GREEN_R, GREEN_G, GREEN_B);
+        }
+    }
+
+    if ((hasCommand != 0U) && (currentCommand.blinkActive != 0U))
+    {
+        if (blinkPhase != 0U)
+        {
+            (void)setLedSquare(currentCommand.blinkSquare, BLUE_R, BLUE_G, BLUE_B);
+        }
+        else
+        {
+            (void)setLedSquare(currentCommand.blinkSquare, 0U, 0U, 0U);
+        }
+    }
+
+    if ((hasCommand != 0U) && (currentCommand.checkActive != 0U))
+    {
+        renderCheckX();
+    }
+
+    if ((hasCommand != 0U) && (currentCommand.invalidActive != 0U))
+    {
+        (void)setLedSquare(currentCommand.invalidFrom, RED_R, RED_G, RED_B);
+        (void)setLedSquare(currentCommand.invalidTo, RED_R, RED_G, RED_B);
+    }
+
+    if ((hasCommand != 0U) && (currentCommand.mateActive != 0U))
+    {
+        renderMateSides(currentCommand.winnerWhite);
+    }
+
+    return led_strip_refresh(ledStrip);
 }
 
 void ledTask(void * parameters)
 {
     led_command_t command;
     BaseType_t status;
-    esp_err_t err;
 
     (void)parameters;
 
     for (;;)
     {
-        status = xQueueReceive(ledQueue, &command, portMAX_DELAY);
+        status = xQueueReceive(ledQueue, &command, pdMS_TO_TICKS(BLINK_MS));
 
         if (status == pdPASS)
         {
-            err = applyCommand(&command);
+            currentCommand = command;
+            hasCommand = 1U;
+            blinkPhase = 1U;
 
-            if (err != ESP_OK)
+            if (render() == ESP_OK)
             {
-                ESP_LOGE(TAG, "LED command failed: %ld", (long)err);
+                ESP_LOGI(TAG, "LED command applied, sequence %lu", (unsigned long)command.sequence);
+            }
+            else
+            {
+                ESP_LOGE(TAG, "LED command failed");
+            }
+        }
+        else
+        {
+            blinkPhase = (blinkPhase == 0U) ? 1U : 0U;
+
+            if ((hasCommand != 0U) &&
+                ((currentCommand.blinkActive != 0U) || (currentCommand.mateActive != 0U)))
+            {
+                (void)render();
             }
         }
     }
