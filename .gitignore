@@ -12,15 +12,17 @@ bootloader-flash_args
 partition-table-flash_args
 
 # Logs and monitor output
-*log
+*.log
 logs/
 monitor.log
-idf_py_stdout_output_*idf_py_stderr_output_
+idf_py_stdout_output_*
+idf_py_stderr_output_*
 
 # Local configuration and credentials
 .env
 .env.*
-*.secret*
+*.secret
+*.secrets
 secrets/
 credentials/
 wifi_credentials.h
@@ -28,32 +30,33 @@ main/wifi_credentials.h
 main/private_config.h
 
 # C/C++ temporary files
-*o
-*obj
-*a
-*so
-*d
-*elf
-*bin
-*map
-*lst
-*su
-*gcda
-*gcno
-*gcov
+*.o
+*.obj
+*.a
+*.so
+*.d
+*.elf
+*.bin
+*.map
+*.lst
+*.su
+*.gcda
+*.gcno
+*.gcov
 
 # Python cache
 __pycache__/
-*py[cod]
+*.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
-# Editors and IDEs .vscode/
+# Editors and IDEs
+.vscode/
 .idea/
 *.swp
 *.swo
-+~
+*~
 .DS_Store
 
 # Local backups
