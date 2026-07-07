@@ -4,20 +4,18 @@
 #include <string.h>
 
 #include "app_types.h"
-#include "chess_logic.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "led.h"
+#include "led_map_generated.h"
 #include "led_strip.h"
 
 #define LED_STRIP_GPIO              (38)
-#define USED_BOARD_LED_COUNT        (64U)
-#define SKIP_BETWEEN_FILES         (5U)
-#define PHYSICAL_FILE_STRIDE        (13U)
-#define LED_STRIP_LED_COUNT         (104U)
+#define LED_STRIP_LED_COUNT         (150U)
+#define INVALID_LED_INDEX           (0xFFFFU)
 
 #define RMT_RESOLUTION_HZ           (10000000U)
 #define RMT_MEM_BLOCK_SYMBOLS       (64U)
@@ -45,18 +43,22 @@ static const char * const TAG = "LED";
 static QueueHandle_t ledQueue = NULL;
 static led_strip_handle_t ledStrip = NULL;
 
-static uint8_t led_intensity = 80U;
+static uint8_t ledIntensity = 80U;
 static led_command_t currentCommand;
 static uint8_t hasCommand = 0U;
 static uint8_t blinkPhase = 1U;
 
+
+static uint8_t applyIntensity(uint8_t value);
 static uint8_t squareToLedIndex(const char square[APP_SQUARE_TEXT_LEN], uint32_t * index);
+static uint8_t isPhysicalPresent(const led_command_t * command, const char square[APP_SQUARE_TEXT_LEN]);
 static esp_err_t clearAll(void);
 static esp_err_t setLedSquare(const char square[APP_SQUARE_TEXT_LEN], uint8_t r, uint8_t g, uint8_t b);
-static void squareFromLinCol(int lin, int col, char square[APP_SQUARE_TEXT_LEN]);
-static esp_err_t render(void);
+static void setSquareText(char square[APP_SQUARE_TEXT_LEN], uint32_t file, uint32_t rank);
 static void renderCheckX(void);
+static void renderMateRank(char rank, uint8_t r, uint8_t g, uint8_t b);
 static void renderMateSides(uint8_t winnerWhite);
+static esp_err_t render(void);
 
 void led_atualizar_config(uint8_t intensidade, uint8_t r, uint8_t g, uint8_t b)
 {
@@ -69,22 +71,22 @@ void led_atualizar_config(uint8_t intensidade, uint8_t r, uint8_t g, uint8_t b)
         intensidade = 100U;
     }
 
-    led_intensity = intensidade;
+    ledIntensity = intensidade;
 }
 
-void led_set_erro(const char* casa_origem, const char* casa_destino)
+void led_set_erro(const char * casa_origem, const char * casa_destino)
 {
     currentCommand.invalidActive = 1U;
 
     if (casa_origem != NULL)
     {
-        strncpy(currentCommand.invalidFrom, casa_origem, APP_SQUARE_TEXT_LEN - 1U);
+        (void)strncpy(currentCommand.invalidFrom, casa_origem, APP_SQUARE_TEXT_LEN - 1U);
         currentCommand.invalidFrom[APP_SQUARE_TEXT_LEN - 1U] = '\0';
     }
 
     if (casa_destino != NULL)
     {
-        strncpy(currentCommand.invalidTo, casa_destino, APP_SQUARE_TEXT_LEN - 1U);
+        (void)strncpy(currentCommand.invalidTo, casa_destino, APP_SQUARE_TEXT_LEN - 1U);
         currentCommand.invalidTo[APP_SQUARE_TEXT_LEN - 1U] = '\0';
     }
 
@@ -144,11 +146,15 @@ esp_err_t ledInit(QueueHandle_t queue)
 
 static uint8_t applyIntensity(uint8_t value)
 {
-    return (uint8_t)(((uint32_t)value * (uint32_t)led_intensity) / 100U);
+    return (uint8_t)(((uint32_t)value * (uint32_t)ledIntensity) / 100U);
 }
 
 static uint8_t squareToLedIndex(const char square[APP_SQUARE_TEXT_LEN], uint32_t * index)
 {
+    uint32_t file;
+    uint32_t rank;
+    uint16_t mapped;
+
     if ((square == NULL) || (index == NULL))
     {
         return 0U;
@@ -160,23 +166,38 @@ static uint8_t squareToLedIndex(const char square[APP_SQUARE_TEXT_LEN], uint32_t
         return 0U;
     }
 
-    uint32_t fileFromH = (uint32_t)('h' - square[0]);
-    uint32_t rank0 = (uint32_t)(square[1] - '1');
-    uint32_t base = fileFromH * PHYSICAL_FILE_STRIDE;
-    uint32_t offset;
+    file = (uint32_t)(square[0] - 'a');
+    rank = (uint32_t)(square[1] - '1');
+    mapped = ledMapGenerated[rank][file];
 
-    if ((fileFromH % 2U) == 0U)
+    if ((mapped == INVALID_LED_INDEX) || (mapped >= LED_STRIP_LED_COUNT))
     {
-        offset = rank0;
-    }
-    else
-    {
-        offset = 7U - rank0;
+        return 0U;
     }
 
-    *index = base + offset;
+    *index = (uint32_t)mapped;
+    return 1U;
+}
 
-    return (*index < LED_STRIP_LED_COUNT) ? 1U : 0U;
+static uint8_t isPhysicalPresent(const led_command_t * command, const char square[APP_SQUARE_TEXT_LEN])
+{
+    uint8_t present = 0U;
+
+    if ((command != NULL) && (square != NULL) &&
+        (square[0] >= 'a') && (square[0] <= 'h') &&
+        (square[1] >= '1') && (square[1] <= '8'))
+    {
+        uint32_t file = (uint32_t)(square[0] - 'a');
+        uint32_t rank = (uint32_t)(square[1] - '1');
+        uint8_t mask = (uint8_t)(1U << file);
+
+        if ((command->physical[rank] & mask) != 0U)
+        {
+            present = 1U;
+        }
+    }
+
+    return present;
 }
 
 static esp_err_t clearAll(void)
@@ -214,19 +235,22 @@ static esp_err_t setLedSquare(const char square[APP_SQUARE_TEXT_LEN], uint8_t r,
     );
 }
 
-static void squareFromLinCol(int lin, int col, char square[APP_SQUARE_TEXT_LEN])
+static void setSquareText(char square[APP_SQUARE_TEXT_LEN], uint32_t file, uint32_t rank)
 {
-    square[0] = (char)('a' + col);
-    square[1] = (char)('8' - lin);
-    square[2] = '\0';
+    if (square != NULL)
+    {
+        square[0] = (char)('a' + (char)file);
+        square[1] = (char)('1' + (char)rank);
+        square[2] = '\0';
+    }
 }
 
 static void renderCheckX(void)
 {
-    const char * diagA[8] = {"a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8"};
-    const char * diagB[8] = {"a8", "b7", "c6", "d5", "e4", "f3", "g2", "h1"};
+    static const char * const diagA[8] = {"a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8"};
+    static const char * const diagB[8] = {"a8", "b7", "c6", "d5", "e4", "f3", "g2", "h1"};
 
-    for (int i = 0; i < 8; i++)
+    for (uint32_t i = 0U; i < 8U; i++)
     {
         (void)setLedSquare(diagA[i], RED_R, RED_G, RED_B);
         (void)setLedSquare(diagB[i], RED_R, RED_G, RED_B);
@@ -286,14 +310,18 @@ static esp_err_t render(void)
         return err;
     }
 
-    for (int lin = 0; lin < 8; lin++)
+    if (hasCommand != 0U)
     {
-        for (int col = 0; col < 8; col++)
+        for (uint32_t rank = 0U; rank < APP_BOARD_RANK_COUNT; rank++)
         {
-            if (tabuleiro[lin][col].tipo != VAZIO)
+            for (uint32_t file = 0U; file < APP_BOARD_FILE_COUNT; file++)
             {
-                squareFromLinCol(lin, col, square);
-                (void)setLedSquare(square, BLUE_R, BLUE_G, BLUE_B);
+                setSquareText(square, file, rank);
+
+                if (isPhysicalPresent(&currentCommand, square) != 0U)
+                {
+                    (void)setLedSquare(square, BLUE_R, BLUE_G, BLUE_B);
+                }
             }
         }
     }

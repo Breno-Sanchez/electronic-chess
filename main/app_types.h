@@ -6,6 +6,8 @@
 #define APP_SQUARE_TEXT_LEN       (3U)
 #define APP_MOVE_TEXT_LEN         (6U)
 #define APP_MAX_LEGAL_MOVES       (32U)
+#define APP_BOARD_RANK_COUNT      (8U)
+#define APP_BOARD_FILE_COUNT      (8U)
 
 typedef enum
 {
@@ -24,6 +26,7 @@ typedef struct
 {
     uint32_t sequence;
     uint8_t clear;
+    uint8_t physical[APP_BOARD_RANK_COUNT];
 
     uint8_t helpEnabled;
     uint8_t blinkActive;

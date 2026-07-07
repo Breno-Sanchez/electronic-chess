@@ -61,12 +61,16 @@ static char statePiece[STATE_TEXT_LEN] = "AGUARDANDO";
 static char stateBest[APP_MOVE_TEXT_LEN] = "-----";
 static char stateLegal[LEGAL_TEXT_LEN] = "-";
 static char statePgn[PGN_TEXT_LEN] = "";
+static uint8_t physicalPresence[APP_BOARD_RANK_COUNT] = {0U};
 
 static size_t boundedStringLength(const char * text, size_t maxLen);
 static void copyText(char * dst, size_t dstLen, const char * src);
 static void copyStringToU8(uint8_t * dst, size_t dstLen, const char * src);
 static void setSquare(char dst[APP_SQUARE_TEXT_LEN], char file, char rank);
 static void setMoveText(char dst[APP_MOVE_TEXT_LEN], const char * src);
+static void setPhysicalPresence(const char square[APP_SQUARE_TEXT_LEN], uint8_t present);
+static void copyPhysicalPresence(led_command_t * command);
+static void sendPhysicalLedUpdate(uint32_t sequence);
 
 static esp_err_t initNvs(void);
 static esp_err_t setEapIdentity(void);
@@ -82,6 +86,7 @@ static esp_err_t rootHandler(httpd_req_t * req)
     char best[APP_MOVE_TEXT_LEN];
     char legal[LEGAL_TEXT_LEN];
     char cells[64] = {0};
+    uint8_t physicalSnapshot[APP_BOARD_RANK_COUNT] = {0U};
     char chunk[512];
     esp_err_t err = ESP_ERR_INVALID_ARG;
 
@@ -96,6 +101,10 @@ static esp_err_t rootHandler(httpd_req_t * req)
         copyText(piece, sizeof(piece), statePiece);
         copyText(best, sizeof(best), stateBest);
         copyText(legal, sizeof(legal), stateLegal);
+        for (uint32_t rank = 0U; rank < APP_BOARD_RANK_COUNT; rank++)
+        {
+            physicalSnapshot[rank] = physicalPresence[rank];
+        }
         (void)xSemaphoreGive(stateMutex);
     }
     else
@@ -171,6 +180,7 @@ static esp_err_t rootHandler(httpd_req_t * req)
         ".legal:after{content:\"\";width:18px;height:18px;border-radius:50%;background:#fff;"
         "opacity:.9;position:absolute;box-shadow:0 0 5px #111}"
         ".best{outline:5px solid #12b312;outline-offset:-5px;background:#77cc77!important}"
+        ".phys{box-shadow:inset 0 0 0 6px #1e56ff}"
         ".info{min-width:360px;max-width:760px;font-size:22px}"
         ".box{background:#fff;padding:16px;margin:0 0 14px 0;border:1px solid #ccc;border-radius:8px}"
         ".fen{font-family:monospace;word-break:break-all;font-size:16px}"
@@ -220,6 +230,11 @@ static esp_err_t rootHandler(httpd_req_t * req)
                  ((best[2] == sq[0]) && (best[3] == sq[1]))))
             {
                 strcat(extra, " best");
+            }
+
+            if ((physicalSnapshot[(uint32_t)r] & ((uint8_t)(1U << (uint32_t)f))) != 0U)
+            {
+                strcat(extra, " phys");
             }
 
             snprintf(
@@ -460,6 +475,53 @@ static void setSquare(char dst[APP_SQUARE_TEXT_LEN], char file, char rank)
 static void setMoveText(char dst[APP_MOVE_TEXT_LEN], const char * src)
 {
     copyText(dst, APP_MOVE_TEXT_LEN, src);
+}
+
+
+static void setPhysicalPresence(const char square[APP_SQUARE_TEXT_LEN], uint8_t present)
+{
+    if ((square != NULL) &&
+        (square[0] >= 'a') && (square[0] <= 'h') &&
+        (square[1] >= '1') && (square[1] <= '8'))
+    {
+        uint32_t file = (uint32_t)(square[0] - 'a');
+        uint32_t rank = (uint32_t)(square[1] - '1');
+        uint8_t mask = (uint8_t)(1U << file);
+
+        if (present != 0U)
+        {
+            physicalPresence[rank] = (uint8_t)(physicalPresence[rank] | mask);
+        }
+        else
+        {
+            physicalPresence[rank] = (uint8_t)(physicalPresence[rank] & ((uint8_t)(~mask)));
+        }
+    }
+}
+
+static void copyPhysicalPresence(led_command_t * command)
+{
+    if (command != NULL)
+    {
+        for (uint32_t rank = 0U; rank < APP_BOARD_RANK_COUNT; rank++)
+        {
+            command->physical[rank] = physicalPresence[rank];
+        }
+    }
+}
+
+static void sendPhysicalLedUpdate(uint32_t sequence)
+{
+    led_command_t command;
+
+    memset(&command, 0, sizeof(command));
+    command.sequence = sequence;
+    copyPhysicalPresence(&command);
+
+    if (ledQueueRef != NULL)
+    {
+        (void)xQueueSend(ledQueueRef, &command, portMAX_DELAY);
+    }
 }
 
 static esp_err_t initNvs(void)
@@ -726,6 +788,7 @@ static void buildOriginHintLedCommand(uint32_t sequence, const char square[APP_S
     {
         memset(command, 0, sizeof(*command));
         command->sequence = sequence;
+        copyPhysicalPresence(command);
         command->bestValid = 0U;
         command->legalCount = 1U;
         copyText(command->legal[0], APP_SQUARE_TEXT_LEN, square);
@@ -740,6 +803,7 @@ static void buildBestMoveLedCommand(uint32_t sequence, const char bestMove[APP_M
     {
         memset(command, 0, sizeof(*command));
         command->sequence = sequence;
+        copyPhysicalPresence(command);
         command->legalCount = 0U;
 
         if ((bestMove[0] >= 'a') && (bestMove[0] <= 'h') &&
@@ -760,7 +824,7 @@ static void buildBestMoveLedCommand(uint32_t sequence, const char bestMove[APP_M
 
 
 // ==============================================================================
-// TASK PRINCIPAL: MOTOR DE XADREZ, INTEGRAÇÃO C/C++ E TRAVAMENTO DE ERRO
+// Main chess controller task
 // ==============================================================================
 void serverTask(void * parameters)
 {
@@ -773,7 +837,7 @@ void serverTask(void * parameters)
     int lin_origem = -1;
     int col_origem = -1;
 
-    // --- VARIÁVEIS DE TRAVAMENTO DE ERRO (LUZ VERMELHA) ---
+    // Invalid move lock state
     bool modo_erro = false;
     int err_lin_esperada = -1, err_col_esperada = -1;
     char casa_origem_str[APP_SQUARE_TEXT_LEN] = "";
@@ -794,6 +858,9 @@ void serverTask(void * parameters)
 
         int col_atual = event.square[0] - 'a';
         int lin_atual = '8' - event.square[1];
+
+        setPhysicalPresence(event.square, (event.state == SENSOR_STATE_PRESENT) ? 1U : 0U);
+        sendPhysicalLedUpdate(event.sequence);
 
         // 1. ESTADO TRAVADO: Aguardando devolver a peça pro lugar certo
         if (modo_erro) {
@@ -826,12 +893,25 @@ void serverTask(void * parameters)
 
             updateState(fenAtual, "LEVANTADA", stateBest, event.square, pgn_atual);
         }
+        else if ((event.state == SENSOR_STATE_PRESENT) && (lin_origem == -1))
+        {
+            updateState(fenAtual, "AGUARDANDO", stateBest, "-", pgn_atual);
+        }
         else if ((event.state == SENSOR_STATE_PRESENT) && (lin_origem != -1))
         {
             ESP_LOGI(TAG, "Peca colocada em: %s", event.square);
             strcpy(casa_destino_str, event.square);
 
-            // Pergunta ao Motor C++ se a jogada é válida nas regras do Xadrez
+            if ((lin_atual == lin_origem) && (col_atual == col_origem))
+            {
+                ESP_LOGI(TAG, "Piece returned to origin: %s", event.square);
+                lin_origem = -1;
+                col_origem = -1;
+                updateState(fenAtual, "AGUARDANDO", stateBest, "-", pgn_atual);
+                continue;
+            }
+
+            // Ask the chess engine whether this is a legal move.
             if (validar_movimento(lin_origem, col_origem, lin_atual, col_atual))
             {
                 // Move virtualmente a peça
@@ -843,7 +923,7 @@ void serverTask(void * parameters)
                 err = queryLocalBestMove(bestMove, fenAtual);
                 if (err != ESP_OK) ESP_LOGW(TAG, "Motor local falhou: %ld", (long)err);
 
-                // Acende verde pra melhor jogada do Lichess
+                // Highlight the best local move in green
                 buildBestMoveLedCommand(event.sequence, bestMove, &command);
                 (void)xQueueSend(ledQueueRef, &command, portMAX_DELAY);
 
@@ -854,14 +934,14 @@ void serverTask(void * parameters)
             }
             else
             {
-                // JOGADA INVÁLIDA DETECTADA
+                // Invalid move detected
                 ESP_LOGW(TAG, "Jogada Invalida! Travando tabuleiro.");
                 
                 modo_erro = true;
                 err_lin_esperada = lin_origem;
                 err_col_esperada = col_origem;
                 
-                // Acende os LEDs vermelhos alertando o erro (usando a função criada no led.c)
+                // Highlight invalid move squares in red
                 led_set_erro(casa_origem_str, casa_destino_str);
 
                 updateState(fenAtual, "JOGADA_INVALIDA", "-----", "-", pgn_atual);
