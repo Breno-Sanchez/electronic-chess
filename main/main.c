@@ -13,11 +13,11 @@
 #include "sensor.h"
 #include "server.h"
 
-#define SENSOR_QUEUE_LEN            (80U)
+#define SENSOR_QUEUE_LEN            (96U)
 #define LED_QUEUE_LEN               (16U)
 
 #define SENSOR_TASK_STACK_BYTES     (3072U)
-#define GAME_TASK_STACK_BYTES       (8192U)
+#define GAME_TASK_STACK_BYTES       (24576U)
 #define LED_TASK_STACK_BYTES        (4096U)
 #define NETWORK_TASK_STACK_BYTES    (8192U)
 

@@ -18,18 +18,18 @@
 #define BLINK_MS                    (250U)
 
 #define WEAK_BLUE_R                 (0U)
-#define WEAK_BLUE_G                 (20U)
-#define WEAK_BLUE_B                 (80U)
+#define WEAK_BLUE_G                 (14U)
+#define WEAK_BLUE_B                 (42U)
 #define STRONG_BLUE_R               (0U)
-#define STRONG_BLUE_G               (36U)
-#define STRONG_BLUE_B               (125U)
-#define YELLOW_R                    (70U)
-#define YELLOW_G                    (58U)
+#define STRONG_BLUE_G               (45U)
+#define STRONG_BLUE_B               (130U)
+#define YELLOW_R                    (110U)
+#define YELLOW_G                    (88U)
 #define YELLOW_B                    (0U)
 #define GREEN_R                     (0U)
-#define GREEN_G                     (65U)
+#define GREEN_G                     (95U)
 #define GREEN_B                     (18U)
-#define RED_R                       (130U)
+#define RED_R                       (110U)
 #define RED_G                       (0U)
 #define RED_B                       (0U)
 
@@ -41,7 +41,7 @@ static led_command_t currentCommand;
 static uint8_t hasCommand = 0U;
 static uint8_t blinkPhase = 1U;
 static uint8_t rainbowPhase = 0U;
-static uint8_t ledIntensity = 35U;
+static uint8_t ledIntensity = 80U;
 
 static uint8_t scale(uint8_t value)
 {
@@ -135,25 +135,6 @@ static void wheel(uint8_t pos, uint8_t * r, uint8_t * g, uint8_t * b)
     }
 }
 
-static uint8_t mapHasAny(const uint8_t map[APP_BOARD_RANK_COUNT])
-{
-    uint8_t any = 0U;
-
-    if (map != NULL)
-    {
-        for (uint8_t rank = 0U; rank < 8U; rank++)
-        {
-            if (map[rank] != 0U)
-            {
-                any = 1U;
-                break;
-            }
-        }
-    }
-
-    return any;
-}
-
 static void renderRainbow(void)
 {
     for (uint8_t rank = 0U; rank < 8U; rank++)
@@ -171,61 +152,33 @@ static void renderRainbow(void)
 
 static void renderMate(void)
 {
-    uint16_t winnerLow = 0U;
-    uint16_t winnerHigh = 0U;
-    uint8_t winnerLower;
-
-    for (uint8_t rank = 0U; rank < 8U; rank++)
+    if (currentCommand.winnerWhite != 0U)
     {
-        uint8_t bits = (currentCommand.winnerWhite != 0U) ? currentCommand.whitePieces[rank] : currentCommand.blackPieces[rank];
-
-        for (uint8_t file = 0U; file < 8U; file++)
+        for (uint8_t rank = 0U; rank < 2U; rank++)
         {
-            if ((bits & ((uint8_t)(1U << file))) != 0U)
-            {
-                if (rank < 4U)
-                {
-                    winnerLow++;
-                }
-                else
-                {
-                    winnerHigh++;
-                }
-            }
+            for (uint8_t file = 0U; file < 8U; file++) (void)setSquareRgb(rank, file, GREEN_R, GREEN_G, GREEN_B);
+        }
+        for (uint8_t rank = 6U; rank < 8U; rank++)
+        {
+            for (uint8_t file = 0U; file < 8U; file++) (void)setSquareRgb(rank, file, RED_R, RED_G, RED_B);
         }
     }
-
-    winnerLower = (winnerLow >= winnerHigh) ? 1U : 0U;
-
-    for (uint8_t rank = 0U; rank < 8U; rank++)
+    else
     {
-        uint8_t rankIsWinnerHalf = (((rank < 4U) && (winnerLower != 0U)) || ((rank >= 4U) && (winnerLower == 0U))) ? 1U : 0U;
-
-        for (uint8_t file = 0U; file < 8U; file++)
+        for (uint8_t rank = 6U; rank < 8U; rank++)
         {
-            if (rankIsWinnerHalf != 0U)
-            {
-                (void)setSquareRgb(rank, file, GREEN_R, GREEN_G, GREEN_B);
-            }
-            else
-            {
-                (void)setSquareRgb(rank, file, RED_R, RED_G, RED_B);
-            }
+            for (uint8_t file = 0U; file < 8U; file++) (void)setSquareRgb(rank, file, GREEN_R, GREEN_G, GREEN_B);
         }
-    }
-
-    for (uint8_t i = 0U; i < 8U; i++)
-    {
-        (void)setSquareRgb(i, i, RED_R, RED_G, RED_B);
-        (void)setSquareRgb(i, (uint8_t)(7U - i), RED_R, RED_G, RED_B);
+        for (uint8_t rank = 0U; rank < 2U; rank++)
+        {
+            for (uint8_t file = 0U; file < 8U; file++) (void)setSquareRgb(rank, file, RED_R, RED_G, RED_B);
+        }
     }
 }
-
 
 static esp_err_t render(void)
 {
     esp_err_t err = clearAll();
-    uint8_t checkActive;
 
     if (err != ESP_OK)
     {
@@ -243,8 +196,6 @@ static esp_err_t render(void)
         renderMate();
         return led_strip_refresh(ledStrip);
     }
-
-    checkActive = mapHasAny(currentCommand.check);
 
     for (uint8_t rank = 0U; rank < 8U; rank++)
     {
@@ -269,17 +220,6 @@ static esp_err_t render(void)
         (void)setSquareText(currentCommand.blinkSquare, STRONG_BLUE_R, STRONG_BLUE_G, STRONG_BLUE_B);
     }
 
-    if ((checkActive != 0U) && (blinkPhase != 0U))
-    {
-        for (uint8_t rank = 0U; rank < 8U; rank++)
-        {
-            for (uint8_t file = 0U; file < 8U; file++)
-            {
-                (void)setSquareRgb(rank, file, RED_R, RED_G, RED_B);
-            }
-        }
-    }
-
     for (uint8_t rank = 0U; rank < 8U; rank++)
     {
         for (uint8_t file = 0U; file < 8U; file++)
@@ -294,7 +234,6 @@ static esp_err_t render(void)
 
     return led_strip_refresh(ledStrip);
 }
-
 
 void led_atualizar_config(uint8_t intensidade, uint8_t r, uint8_t g, uint8_t b)
 {

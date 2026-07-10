@@ -22,10 +22,10 @@
 #include "nvs_flash.h"
 #include "server.h"
 
-#define WIFI_SSID_TXT              "UTFPR-ALUNO"
-#define EAP_IDENTITY_TXT           "a2342774"
-#define EAP_USERNAME_TXT           "a2342774"
-#define EAP_PASSWORD_TXT           "mrmugu14"
+#define WIFI_SSID_TXT              "__WIFI_SSID__"
+#define EAP_IDENTITY_TXT           "__EAP_IDENTITY__"
+#define EAP_USERNAME_TXT           "__EAP_USERNAME__"
+#define EAP_PASSWORD_TXT           "__EAP_PASSWORD__"
 #define SOFTAP_SSID_TXT            "XADREZ_ESP"
 #define SOFTAP_PASS_TXT            "xadrez12345"
 #define SOFTAP_CHANNEL             (1U)
@@ -36,7 +36,7 @@
 #define LEGAL_TEXT_LEN             (256U)
 #define HTTP_CHUNK_LEN             (768U)
 #define GAME_COMMAND_QUEUE_LEN     (8U)
-#define START_RAINBOW_MS           (700U)
+#define START_RAINBOW_MS           (1600U)
 
 typedef enum
 {
@@ -89,8 +89,6 @@ static char stateLegal[LEGAL_TEXT_LEN] = "-";
 static char stateBest[APP_MOVE_TEXT_LEN] = "-----";
 static uint8_t winnerWhite = 0U;
 static uint32_t ledSequence = 1U;
-static uint8_t orientationKnown = 0U;
-static uint8_t orientationFlipRanks = 0U;
 
 static size_t boundedStringLength(const char * text, size_t maxLen);
 static void copyStringToU8(uint8_t * dst, size_t dstLen, const char * src);
@@ -102,11 +100,6 @@ static void sendLedFrame(uint8_t rainbowActive);
 static void setMode(game_mode_t mode, const char * text);
 static bool physicalMatchesStart(void);
 static bool physicalMatchesBoard(void);
-static void updateSetupFeedback(void);
-static bool physicalSquareToVirtualIndex(const char square[APP_SQUARE_TEXT_LEN], uint8_t * row, uint8_t * col);
-static void virtualIndexToPhysicalSquare(uint8_t row, uint8_t col, char square[APP_SQUARE_TEXT_LEN]);
-static void setVirtualBit(uint8_t map[APP_BOARD_RANK_COUNT], uint8_t row, uint8_t col);
-static bool selectOrientationForLift(const char square[APP_SQUARE_TEXT_LEN], uint8_t * row, uint8_t * col, chess_piece_t * piece);
 static void startGame(void);
 static void handleSensorEvent(const sensor_event_t * event);
 static void handleGameCommand(const game_command_t * command);
@@ -127,8 +120,7 @@ static esp_err_t apiStateHandler(httpd_req_t * req);
 static esp_err_t apiStartHandler(httpd_req_t * req);
 static esp_err_t apiPromoteHandler(httpd_req_t * req);
 
-static const httpd_uri_t rootUri = {
- .uri = "/", .method = HTTP_GET, .handler = rootHandler, .user_ctx = NULL };
+static const httpd_uri_t rootUri = { .uri = "/", .method = HTTP_GET, .handler = rootHandler, .user_ctx = NULL };
 static const httpd_uri_t stateUri = { .uri = "/api/state", .method = HTTP_GET, .handler = apiStateHandler, .user_ctx = NULL };
 static const httpd_uri_t startUri = { .uri = "/api/start", .method = HTTP_POST, .handler = apiStartHandler, .user_ctx = NULL };
 static const httpd_uri_t promoteUri = { .uri = "/api/promote", .method = HTTP_POST, .handler = apiPromoteHandler, .user_ctx = NULL };
@@ -226,147 +218,9 @@ static void updatePhysical(const char square[APP_SQUARE_TEXT_LEN], uint8_t prese
     }
 }
 
-static bool physicalSquareToVirtualIndex(const char square[APP_SQUARE_TEXT_LEN], uint8_t * row, uint8_t * col)
-{
-    uint8_t directRow;
-    uint8_t directCol;
-
-    if ((square == NULL) || (row == NULL) || (col == NULL))
-    {
-        return false;
-    }
-
-    if (chess_square_to_index(square, &directRow, &directCol) == false)
-    {
-        return false;
-    }
-
-    if ((orientationKnown != 0U) && (orientationFlipRanks != 0U))
-    {
-        directRow = (uint8_t)(7U - directRow);
-    }
-
-    *row = directRow;
-    *col = directCol;
-
-    return true;
-}
-
-static void virtualIndexToPhysicalSquare(uint8_t row, uint8_t col, char square[APP_SQUARE_TEXT_LEN])
-{
-    uint8_t physicalRow = row;
-    uint8_t physicalCol = col;
-
-    if (square == NULL)
-    {
-        return;
-    }
-
-    if (physicalRow >= 8U)
-    {
-        physicalRow = 7U;
-    }
-
-    if (physicalCol >= 8U)
-    {
-        physicalCol = 7U;
-    }
-
-    if ((orientationKnown != 0U) && (orientationFlipRanks != 0U))
-    {
-        physicalRow = (uint8_t)(7U - physicalRow);
-    }
-
-    chess_index_to_square(physicalRow, physicalCol, square);
-}
-
-static void setVirtualBit(uint8_t map[APP_BOARD_RANK_COUNT], uint8_t row, uint8_t col)
-{
-    char physicalSquare[APP_SQUARE_TEXT_LEN];
-
-    if (map == NULL)
-    {
-        return;
-    }
-
-    virtualIndexToPhysicalSquare(row, col, physicalSquare);
-    setBit(map, physicalSquare);
-}
-
-static bool selectOrientationForLift(const char square[APP_SQUARE_TEXT_LEN], uint8_t * row, uint8_t * col, chess_piece_t * piece)
-{
-    uint8_t directRow;
-    uint8_t directCol;
-    uint8_t flippedRow;
-    chess_piece_t directPiece;
-    chess_piece_t flippedPiece;
-
-    if ((square == NULL) || (row == NULL) || (col == NULL) || (piece == NULL))
-    {
-        return false;
-    }
-
-    if (chess_square_to_index(square, &directRow, &directCol) == false)
-    {
-        return false;
-    }
-
-    if (orientationKnown != 0U)
-    {
-        *row = directRow;
-        *col = directCol;
-
-        if (orientationFlipRanks != 0U)
-        {
-            *row = (uint8_t)(7U - directRow);
-        }
-
-        *piece = chess_get_piece(&game, *row, *col);
-        return ((piece->type != CHESS_EMPTY) && (piece->color == game.side_to_move));
-    }
-
-    directPiece = chess_get_piece(&game, directRow, directCol);
-    flippedRow = (uint8_t)(7U - directRow);
-    flippedPiece = chess_get_piece(&game, flippedRow, directCol);
-
-    if ((directPiece.type != CHESS_EMPTY) && (directPiece.color == game.side_to_move))
-    {
-        orientationKnown = 1U;
-        orientationFlipRanks = 0U;
-        *row = directRow;
-        *col = directCol;
-        *piece = directPiece;
-        ESP_LOGI(TAG, "Board orientation selected: normal, first moved side is white");
-        return true;
-    }
-
-    if ((flippedPiece.type != CHESS_EMPTY) && (flippedPiece.color == game.side_to_move))
-    {
-        orientationKnown = 1U;
-        orientationFlipRanks = 1U;
-        *row = flippedRow;
-        *col = directCol;
-        *piece = flippedPiece;
-        ESP_LOGI(TAG, "Board orientation selected: flipped ranks, first moved side is white");
-        return true;
-    }
-
-    *row = directRow;
-    *col = directCol;
-    *piece = directPiece;
-
-    return false;
-}
-
-
 static void rebuildOwnerMaps(led_command_t * command)
 {
     if (command == NULL)
-    {
-        return;
-    }
-
-    if (orientationKnown == 0U)
     {
         return;
     }
@@ -376,20 +230,8 @@ static void rebuildOwnerMaps(led_command_t * command)
         for (uint8_t col = 0U; col < 8U; col++)
         {
             chess_piece_t piece = chess_get_piece(&game, row, col);
-            char physicalSquare[APP_SQUARE_TEXT_LEN];
-            uint8_t rank;
-            uint8_t file;
-            uint8_t bit;
-
-            if (piece.type == CHESS_EMPTY)
-            {
-                continue;
-            }
-
-            virtualIndexToPhysicalSquare(row, col, physicalSquare);
-            rank = (uint8_t)(physicalSquare[1] - '1');
-            file = (uint8_t)(physicalSquare[0] - 'a');
-            bit = (uint8_t)(1U << file);
+            uint8_t rank = (uint8_t)(7U - row);
+            uint8_t bit = (uint8_t)(1U << col);
 
             if (piece.color == CHESS_WHITE)
             {
@@ -403,20 +245,14 @@ static void rebuildOwnerMaps(led_command_t * command)
     }
 }
 
-
 static void sendLedFrame(uint8_t rainbowActive)
 {
     led_command_t command;
 
-    if (gameMode == GAME_MODE_SETUP)
-    {
-        updateSetupFeedback();
-    }
-
     (void)memset(&command, 0, sizeof(command));
     command.sequence = ledSequence++;
     command.gameMode = (uint8_t)gameMode;
-    command.sideToMove = ((orientationKnown != 0U) ? ((game.side_to_move == CHESS_WHITE) ? LED_SIDE_WHITE : LED_SIDE_BLACK) : LED_SIDE_NONE);
+    command.sideToMove = (game.side_to_move == CHESS_WHITE) ? LED_SIDE_WHITE : LED_SIDE_BLACK;
     command.rainbowActive = rainbowActive;
     command.blinkActive = selectedValid;
     command.mateActive = (gameMode == GAME_MODE_CHECKMATE_LOCK) ? 1U : 0U;
@@ -437,7 +273,6 @@ static void sendLedFrame(uint8_t rainbowActive)
     }
 }
 
-
 static bool physicalMatchesStart(void)
 {
     for (uint8_t rank = 0U; rank < 8U; rank++)
@@ -451,51 +286,6 @@ static bool physicalMatchesStart(void)
     return true;
 }
 
-static void updateSetupFeedback(void)
-{
-    uint32_t missingCount = 0U;
-    uint32_t extraCount = 0U;
-
-    clearMaps();
-
-    for (uint8_t rank = 0U; rank < 8U; rank++)
-    {
-        uint8_t expected = ((rank <= 1U) || (rank >= 6U)) ? 0xFFU : 0x00U;
-        uint8_t missing = (uint8_t)(expected & ((uint8_t)(~physicalPresence[rank])));
-        uint8_t extra = (uint8_t)(((uint8_t)(~expected)) & physicalPresence[rank]);
-        uint8_t wrong = (uint8_t)(missing | extra);
-
-        invalidMap[rank] = wrong;
-
-        for (uint8_t file = 0U; file < 8U; file++)
-        {
-            uint8_t bit = (uint8_t)(1U << file);
-            if ((missing & bit) != 0U)
-            {
-                missingCount++;
-            }
-            if ((extra & bit) != 0U)
-            {
-                extraCount++;
-            }
-        }
-    }
-
-    if ((missingCount == 0U) && (extraCount == 0U))
-    {
-        (void)snprintf(stateText, sizeof(stateText), "SETUP_READY");
-        (void)snprintf(stateLegal, sizeof(stateLegal), "Setup ready. Press Start.");
-    }
-    else
-    {
-        (void)snprintf(stateText, sizeof(stateText), "SETUP_NOT_READY");
-        (void)snprintf(stateLegal, sizeof(stateLegal), "Missing:%lu Extra:%lu", (unsigned long)missingCount, (unsigned long)extraCount);
-    }
-
-    (void)snprintf(stateBest, sizeof(stateBest), "-----");
-}
-
-
 static bool physicalMatchesBoard(void)
 {
     uint8_t expected[8] = {0U};
@@ -506,14 +296,8 @@ static bool physicalMatchesBoard(void)
         {
             if (game.board[row][col].type != CHESS_EMPTY)
             {
-                char physicalSquare[APP_SQUARE_TEXT_LEN];
-                uint8_t rank;
-                uint8_t file;
-
-                virtualIndexToPhysicalSquare(row, col, physicalSquare);
-                rank = (uint8_t)(physicalSquare[1] - '1');
-                file = (uint8_t)(physicalSquare[0] - 'a');
-                expected[rank] = (uint8_t)(expected[rank] | ((uint8_t)(1U << file)));
+                uint8_t rank = (uint8_t)(7U - row);
+                expected[rank] = (uint8_t)(expected[rank] | ((uint8_t)(1U << col)));
             }
         }
     }
@@ -528,7 +312,6 @@ static bool physicalMatchesBoard(void)
 
     return true;
 }
-
 
 static void updateLegalTextFromMap(void)
 {
@@ -560,190 +343,49 @@ static void updateCheckState(void)
 {
     uint8_t row;
     uint8_t col;
+    char square[APP_SQUARE_TEXT_LEN];
 
     (void)memset(checkMap, 0, sizeof(checkMap));
 
     if ((chess_is_check(&game, game.side_to_move) == true) &&
         (chess_find_king(&game, game.side_to_move, &row, &col) == true))
     {
-        if (chess_is_checkmate(&game, game.side_to_move) == true)
-        {
-            for (uint8_t i = 0U; i < 8U; i++)
-            {
-                setVirtualBit(checkMap, i, i);
-                setVirtualBit(checkMap, i, (uint8_t)(7U - i));
-            }
+        chess_index_to_square(row, col, square);
+        setBit(checkMap, square);
+    }
 
-            setVirtualBit(checkMap, row, col);
-            winnerWhite = (game.side_to_move == CHESS_BLACK) ? 1U : 0U;
-            setMode(GAME_MODE_CHECKMATE_LOCK, "CHECKMATE");
-        }
-        else
-        {
-            setVirtualBit(checkMap, row, col);
-        }
+    if (chess_is_checkmate(&game, game.side_to_move) == true)
+    {
+        winnerWhite = (game.side_to_move == CHESS_BLACK) ? 1U : 0U;
+        setMode(GAME_MODE_CHECKMATE_LOCK, "CHECKMATE");
     }
 }
-
-
-static int pieceMaterialValue(chess_piece_type_t type)
-{
-    int value = 0;
-
-    switch (type)
-    {
-        case CHESS_PAWN:   value = 1; break;
-        case CHESS_KNIGHT: value = 3; break;
-        case CHESS_BISHOP: value = 3; break;
-        case CHESS_ROOK:   value = 5; break;
-        case CHESS_QUEEN:  value = 9; break;
-        default:           value = 0; break;
-    }
-
-    return value;
-}
-
-static char pieceMaterialLetter(chess_piece_type_t type)
-{
-    char value = '-';
-
-    switch (type)
-    {
-        case CHESS_PAWN:   value = 'P'; break;
-        case CHESS_KNIGHT: value = 'N'; break;
-        case CHESS_BISHOP: value = 'B'; break;
-        case CHESS_ROOK:   value = 'R'; break;
-        case CHESS_QUEEN:  value = 'Q'; break;
-        default:           value = '-'; break;
-    }
-
-    return value;
-}
-
-static uint8_t initialPieceCount(chess_piece_type_t type)
-{
-    uint8_t count = 0U;
-
-    switch (type)
-    {
-        case CHESS_PAWN:   count = 8U; break;
-        case CHESS_KNIGHT: count = 2U; break;
-        case CHESS_BISHOP: count = 2U; break;
-        case CHESS_ROOK:   count = 2U; break;
-        case CHESS_QUEEN:  count = 1U; break;
-        case CHESS_KING:   count = 1U; break;
-        default:           count = 0U; break;
-    }
-
-    return count;
-}
-
-static uint8_t currentPieceCount(chess_color_t color, chess_piece_type_t type)
-{
-    uint8_t count = 0U;
-
-    for (uint8_t row = 0U; row < 8U; row++)
-    {
-        for (uint8_t col = 0U; col < 8U; col++)
-        {
-            chess_piece_t piece = chess_get_piece(&game, row, col);
-
-            if ((piece.color == color) && (piece.type == type))
-            {
-                count++;
-            }
-        }
-    }
-
-    return count;
-}
-
-static void appendCaptureText(char * dst, size_t dstLen, size_t * pos, const char * text)
-{
-    if ((dst == NULL) || (pos == NULL) || (*pos >= dstLen))
-    {
-        return;
-    }
-
-    *pos += (size_t)snprintf(&dst[*pos], dstLen - *pos, "%s", text);
-}
-
-static void buildCapturedMaterialText(chess_color_t capturedColor, char * dst, size_t dstLen, uint16_t * points)
-{
-    static const chess_piece_type_t order[5] = {
-        CHESS_QUEEN, CHESS_ROOK, CHESS_BISHOP, CHESS_KNIGHT, CHESS_PAWN
-    };
-    size_t pos = 0U;
-    bool any = false;
-    uint16_t score = 0U;
-
-    if ((dst == NULL) || (dstLen == 0U) || (points == NULL))
-    {
-        return;
-    }
-
-    dst[0] = '\0';
-
-    for (uint8_t index = 0U; index < 5U; index++)
-    {
-        chess_piece_type_t type = order[index];
-        uint8_t initial = initialPieceCount(type);
-        uint8_t current = currentPieceCount(capturedColor, type);
-        uint8_t captured = (current < initial) ? (uint8_t)(initial - current) : 0U;
-
-        if (captured != 0U)
-        {
-            char item[16];
-
-            if (any != false)
-            {
-                appendCaptureText(dst, dstLen, &pos, " ");
-            }
-
-            (void)snprintf(item, sizeof(item), "%cx%u", pieceMaterialLetter(type), (unsigned int)captured);
-            appendCaptureText(dst, dstLen, &pos, item);
-            score = (uint16_t)(score + ((uint16_t)captured * (uint16_t)pieceMaterialValue(type)));
-            any = true;
-        }
-    }
-
-    if (any == false)
-    {
-        (void)snprintf(dst, dstLen, "none");
-    }
-
-    *points = score;
-}
-
-
 
 static void computeLiftHints(uint8_t row, uint8_t col)
 {
     chess_move_t moves[CHESS_MAX_MOVES];
     chess_move_t best;
     uint32_t count;
-    char fromSquare[APP_SQUARE_TEXT_LEN];
-    char toSquare[APP_SQUARE_TEXT_LEN];
+    char square[APP_SQUARE_TEXT_LEN];
 
     clearMaps();
     count = chess_generate_legal_moves_from(&game, row, col, moves, CHESS_MAX_MOVES);
 
     for (uint32_t i = 0U; i < count; i++)
     {
-        setVirtualBit(legalMap, moves[i].to_row, moves[i].to_col);
+        chess_index_to_square(moves[i].to_row, moves[i].to_col, square);
+        setBit(legalMap, square);
     }
 
     if (chess_engine_best_for_origin(&game, row, col, &best) == true)
     {
-        setVirtualBit(bestMap, best.to_row, best.to_col);
-        virtualIndexToPhysicalSquare(best.from_row, best.from_col, fromSquare);
-        virtualIndexToPhysicalSquare(best.to_row, best.to_col, toSquare);
-        (void)snprintf(stateBest, sizeof(stateBest), "%c%c%c%c", fromSquare[0], fromSquare[1], toSquare[0], toSquare[1]);
+        chess_index_to_square(best.to_row, best.to_col, square);
+        setBit(bestMap, square);
+        (void)snprintf(stateBest, sizeof(stateBest), "%c%c%c%c", (char)('a' + best.from_col), (char)('8' - best.from_row), (char)('a' + best.to_col), (char)('8' - best.to_row));
     }
 
     updateLegalTextFromMap();
 }
-
 
 static chess_piece_type_t selectorPromotionPiece(const char square[APP_SQUARE_TEXT_LEN])
 {
@@ -769,7 +411,7 @@ static bool applySelectedMove(uint8_t toRow, uint8_t toCol, chess_piece_type_t p
     uint8_t fromCol;
     chess_move_t move;
 
-    if ((selectedValid == 0U) || (physicalSquareToVirtualIndex(selectedSquare, &fromRow, &fromCol) == false))
+    if ((selectedValid == 0U) || (chess_square_to_index(selectedSquare, &fromRow, &fromCol) == false))
     {
         return false;
     }
@@ -791,7 +433,7 @@ static bool applySelectedMove(uint8_t toRow, uint8_t toCol, chess_piece_type_t p
         pendingPromotionValid = 1U;
         setMode(GAME_MODE_PROMOTION_PENDING, "PROMOTION_PENDING");
         clearMaps();
-        virtualIndexToPhysicalSquare(toRow, toCol, selectedSquare);
+        chess_index_to_square(toRow, toCol, selectedSquare);
         selectedValid = 1U;
         return true;
     }
@@ -814,20 +456,18 @@ static bool applySelectedMove(uint8_t toRow, uint8_t toCol, chess_piece_type_t p
 
     if (gameMode != GAME_MODE_CHECKMATE_LOCK)
     {
-        if (chess_is_check(&game, game.side_to_move) == true)
+        if (physicalMatchesBoard() == true)
         {
-            setMode(GAME_MODE_RUNNING, "CHECK");
+            setMode(GAME_MODE_RUNNING, "RUNNING");
         }
         else
         {
-            setMode(GAME_MODE_RUNNING, "RUNNING");
+            setMode(GAME_MODE_SYNC_WAIT, "SYNC_WAIT");
         }
     }
 
     return true;
 }
-
-
 
 static void startGame(void)
 {
@@ -836,24 +476,24 @@ static void startGame(void)
     selectedSquare[0] = '\0';
     pendingPromotionValid = 0U;
     winnerWhite = 0U;
-    orientationKnown = 0U;
-    orientationFlipRanks = 0U;
 
     if (physicalMatchesStart() == false)
     {
         setMode(GAME_MODE_SETUP, "SETUP_NOT_READY");
-        updateSetupFeedback();
+        invalidMap[0] = 0xFFU;
+        invalidMap[1] = 0xFFU;
+        invalidMap[6] = 0xFFU;
+        invalidMap[7] = 0xFFU;
         sendLedFrame(0U);
         return;
     }
 
     chess_reset(&game);
-    setMode(GAME_MODE_RUNNING, "RUNNING_WAIT_FIRST_WHITE");
+    setMode(GAME_MODE_RUNNING, "RUNNING");
     sendLedFrame(1U);
     vTaskDelay(pdMS_TO_TICKS(START_RAINBOW_MS));
     sendLedFrame(0U);
 }
-
 
 static void handleGameCommand(const game_command_t * command)
 {
@@ -869,7 +509,7 @@ static void handleGameCommand(const game_command_t * command)
     else if ((command->type == GAME_COMMAND_PROMOTE) && (gameMode == GAME_MODE_PROMOTION_PENDING) && (pendingPromotionValid != 0U))
     {
         selectedValid = 1U;
-        virtualIndexToPhysicalSquare(pendingPromotionMove.from_row, pendingPromotionMove.from_col, selectedSquare);
+        chess_index_to_square(pendingPromotionMove.from_row, pendingPromotionMove.from_col, selectedSquare);
         (void)applySelectedMove(pendingPromotionMove.to_row, pendingPromotionMove.to_col, command->promotion);
         sendLedFrame(0U);
     }
@@ -887,12 +527,9 @@ static void processPendingCommands(void)
 
 static void handleSensorEvent(const sensor_event_t * event)
 {
-    uint8_t row = 0U;
-    uint8_t col = 0U;
-    uint8_t targetRow = 0U;
-    uint8_t targetCol = 0U;
-    chess_piece_t piece = { CHESS_EMPTY, CHESS_COLOR_NONE, 0U };
-    chess_piece_t targetPiece = { CHESS_EMPTY, CHESS_COLOR_NONE, 0U };
+    uint8_t row;
+    uint8_t col;
+    chess_piece_t piece;
     chess_piece_type_t promotion;
 
     if ((event == NULL) || (chess_square_to_index(event->square, &row, &col) == false))
@@ -902,116 +539,51 @@ static void handleSensorEvent(const sensor_event_t * event)
 
     updatePhysical(event->square, (event->state == SENSOR_STATE_PRESENT) ? 1U : 0U);
 
-    if (gameMode == GAME_MODE_SETUP)
-    {
-        updateSetupFeedback();
-        sendLedFrame(0U);
-        return;
-    }
-
-    if (gameMode == GAME_MODE_CHECKMATE_LOCK)
+    if ((gameMode == GAME_MODE_SETUP) || (gameMode == GAME_MODE_CHECKMATE_LOCK))
     {
         sendLedFrame(0U);
         return;
     }
 
-    if (gameMode == GAME_MODE_INVALID_LOCK)
+    if ((gameMode == GAME_MODE_INVALID_LOCK) || (gameMode == GAME_MODE_SYNC_WAIT))
     {
         if (physicalMatchesBoard() == true)
         {
             clearMaps();
-            selectedValid = 0U;
-            selectedSquare[0] = '\0';
             setMode(GAME_MODE_RUNNING, "RUNNING");
         }
-
         sendLedFrame(0U);
         return;
-    }
-
-    if (gameMode == GAME_MODE_SYNC_WAIT)
-    {
-        clearMaps();
-        selectedValid = 0U;
-        selectedSquare[0] = '\0';
-        setMode(GAME_MODE_RUNNING, "RUNNING_RESYNC");
     }
 
     if (gameMode == GAME_MODE_PROMOTION_PENDING)
     {
         promotion = selectorPromotionPiece(event->square);
-
-        if ((promotion != CHESS_EMPTY) &&
-            (event->state == SENSOR_STATE_PRESENT) &&
-            (pendingPromotionValid != 0U))
+        if ((promotion != CHESS_EMPTY) && (event->state == SENSOR_STATE_PRESENT) && (pendingPromotionValid != 0U))
         {
             game_command_t command = { GAME_COMMAND_PROMOTE, promotion };
             handleGameCommand(&command);
         }
-
         sendLedFrame(0U);
         return;
     }
 
     if (event->state == SENSOR_STATE_LIFTED)
     {
-        if ((selectedValid != 0U) &&
-            (orientationKnown != 0U) &&
-            (physicalSquareToVirtualIndex(event->square, &targetRow, &targetCol) == true))
-        {
-            targetPiece = chess_get_piece(&game, targetRow, targetCol);
-
-            if ((targetPiece.type != CHESS_EMPTY) &&
-                (targetPiece.color != game.side_to_move))
-            {
-                clearMaps();
-                setVirtualBit(legalMap, targetRow, targetCol);
-                setMode(GAME_MODE_LIFTED, "CAPTURE_TARGET_REMOVED");
-                ESP_LOGI(TAG, "Capture target removed at %s. Place the selected piece on that square.", event->square);
-                sendLedFrame(0U);
-                return;
-            }
-        }
-
+        piece = chess_get_piece(&game, row, col);
         clearMaps();
 
-        if (selectOrientationForLift(event->square, &row, &col, &piece) == true)
+        if ((piece.type != CHESS_EMPTY) && (piece.color == game.side_to_move))
         {
             (void)snprintf(selectedSquare, sizeof(selectedSquare), "%s", event->square);
             selectedValid = 1U;
             computeLiftHints(row, col);
             setMode(GAME_MODE_LIFTED, "PIECE_LIFTED");
         }
-        else if ((orientationKnown != 0U) &&
-                 (physicalSquareToVirtualIndex(event->square, &targetRow, &targetCol) == true))
-        {
-            targetPiece = chess_get_piece(&game, targetRow, targetCol);
-
-            if ((targetPiece.type != CHESS_EMPTY) &&
-                (targetPiece.color != game.side_to_move))
-            {
-                selectedValid = 0U;
-                selectedSquare[0] = '\0';
-                setVirtualBit(legalMap, targetRow, targetCol);
-                setMode(GAME_MODE_RUNNING, "CAPTURE_TARGET_REMOVED");
-                ESP_LOGI(TAG, "Opponent piece removed first at %s. Now lift the moving piece.", event->square);
-            }
-            else
-            {
-                selectedValid = 0U;
-                selectedSquare[0] = '\0';
-                setBit(invalidMap, event->square);
-                setMode(GAME_MODE_SYNC_WAIT, "RESTORE_BOARD");
-                ESP_LOGW(TAG, "Lift rejected at %s. Restore the physical board.", event->square);
-            }
-        }
         else
         {
-            selectedValid = 0U;
-            selectedSquare[0] = '\0';
             setBit(invalidMap, event->square);
-            setMode(GAME_MODE_SYNC_WAIT, "RESTORE_BOARD");
-            ESP_LOGW(TAG, "Lift rejected at %s. Restore the physical board.", event->square);
+            setMode(GAME_MODE_INVALID_LOCK, "INVALID_LIFT");
         }
     }
     else if ((event->state == SENSOR_STATE_PRESENT) && (selectedValid != 0U))
@@ -1023,12 +595,6 @@ static void handleSensorEvent(const sensor_event_t * event)
             clearMaps();
             setMode(GAME_MODE_RUNNING, "RUNNING");
         }
-        else if (physicalSquareToVirtualIndex(event->square, &row, &col) == false)
-        {
-            setBit(invalidMap, selectedSquare);
-            setBit(invalidMap, event->square);
-            setMode(GAME_MODE_INVALID_LOCK, "INVALID_SQUARE");
-        }
         else if (applySelectedMove(row, col, CHESS_EMPTY) == false)
         {
             setBit(invalidMap, selectedSquare);
@@ -1039,8 +605,6 @@ static void handleSensorEvent(const sensor_event_t * event)
 
     sendLedFrame(0U);
 }
-
-
 
 esp_err_t serverInit(QueueHandle_t sensorQueue, QueueHandle_t ledQueue)
 {
@@ -1227,16 +791,28 @@ static esp_err_t startHttpServer(void)
 
 static esp_err_t rootHandler(httpd_req_t * req)
 {
-    static const char html[] = "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Xadrez ESP32-S3</title><style>\nbody{font-family:Arial,sans-serif;background:#10131a;color:#eee;margin:18px}.layout{display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start}.board{display:grid;grid-template-columns:repeat(8,64px);grid-template-rows:repeat(8,64px);border:5px solid #222;background:#222}.sq{width:64px;height:64px;display:flex;align-items:center;justify-content:center;font-size:36px;box-sizing:border-box;position:relative;font-weight:700}.light{background:#d9c09b;color:#111}.dark{background:#73543a;color:#111}.coord{position:absolute;right:4px;bottom:3px;font-size:11px;opacity:.72}.phys{box-shadow:inset 0 0 0 6px #285dff}.turn{box-shadow:inset 0 0 0 8px #4ba3ff}.setupok{background:#064ec9!important;color:#fff;box-shadow:inset 0 0 0 4px #8bbcff}.legal{background:#d8c52f!important;color:#111}.best{background:#0b9f39!important;color:#fff}.invalid,.check{background:#c01818!important;color:#fff;box-shadow:inset 0 0 0 5px #ffb0b0}.checkpulse{animation:pulseRed .8s infinite}.sel{animation:blink .7s infinite}@keyframes blink{50%{filter:brightness(1.8)}}@keyframes pulseRed{50%{background:#c01818;color:#fff}}button{font-size:20px;margin:4px;padding:10px 18px;border-radius:8px;border:0}.box{background:#1d2430;padding:12px;margin:8px 0;border-radius:8px;max-width:900px}.fen{font-family:monospace;word-break:break-all;font-size:14px}.legend span{display:inline-block;padding:5px 8px;margin:3px;border-radius:5px}.blue{background:#064ec9}.red{background:#c01818}.yellow{background:#d8c52f;color:#111}.green{background:#0b9f39}.warn{font-size:18px;color:#ffd37a}.score{display:grid;grid-template-columns:1fr 1fr;gap:8px}.score div{background:#141a24;border-radius:6px;padding:8px}.statusCheck{color:#ffb0b0;font-weight:700;font-size:20px}</style></head><body><h1>Xadrez f\u00edsico ESP32-S3</h1><div><button onclick=\"startGame()\">Start</button><button onclick=\"promote('Q')\">Queen</button><button onclick=\"promote('R')\">Rook</button><button onclick=\"promote('B')\">Bishop</button><button onclick=\"promote('N')\">Knight</button></div><div class=\"box legend\"><span class=\"blue\">Setup blue = correct piece</span><span class=\"red\">Red = wrong/check</span><span class=\"yellow\">Legal move</span><span class=\"green\">Best local move</span></div><div class=\"layout\"><div class=\"board\" id=\"board\"></div><div><div class=\"box\" id=\"info\"></div><div class=\"box score\" id=\"captures\"></div><div class=\"box\" id=\"setup\"></div><div class=\"box fen\" id=\"fen\"></div><div class=\"box fen\" id=\"pgn\"></div></div></div><script>\nconst pcs={P:'\u2659',N:'\u2658',B:'\u2657',R:'\u2656',Q:'\u2655',K:'\u2654',p:'\u265f',n:'\u265e',b:'\u265d',r:'\u265c',q:'\u265b',k:'\u265a'};function bit(arr,sq){let f=sq.charCodeAt(0)-97,r=sq.charCodeAt(1)-49;return Array.isArray(arr)&&((arr[r]>>f)&1)!==0;}async function startGame(){await fetch('/api/start',{method:'POST'});update();}async function promote(p){await fetch('/api/promote?p='+p,{method:'POST'});update();}\nfunction virtualSq(s,sq){if(s.orientation==='flipped'){let r=9-parseInt(sq[1]);return sq[0]+r;}return sq;}function cellPiece(fen,sq){let rows=fen.split(' ')[0].split('/');let r=8-parseInt(sq[1]),f=sq.charCodeAt(0)-97,x=0;if(!rows[r])return '';for(const ch of rows[r]){if(ch>='1'&&ch<='8'){x+=parseInt(ch);}else{if(x===f)return pcs[ch]||'';x++;}}return '';}\nfunction setupLists(s){let missing=[],extra=[];for(let r=1;r<=8;r++){for(let f=0;f<8;f++){let sq=String.fromCharCode(97+f)+r;if(bit(s.invalid,sq)){if(bit(s.physical,sq))extra.push(sq);else missing.push(sq);}}}return {missing,extra};}\nfunction hasCheck(s){for(let r=1;r<=8;r++){for(let f=0;f<8;f++){if(bit(s.check,String.fromCharCode(97+f)+r))return true;}}return false;}\nasync function update(){let s=await (await fetch('/api/state')).json();let b=document.getElementById('board');let isSetup=s.mode==='SETUP';let check=hasCheck(s);b.innerHTML='';for(let r=8;r>=1;r--){for(let f=0;f<8;f++){let sq=String.fromCharCode(97+f)+r;let phys=bit(s.physical,sq),inv=bit(s.invalid,sq);let c='sq '+(((r+f)%2)?'dark':'light');if(check&&s.mode!=='CHECKMATE')c+=' checkpulse';if(isSetup&&phys&&!inv)c+=' setupok';else if(phys)c+=' phys';if(bit(s.turn,sq))c+=' turn';if(bit(s.legal,sq))c+=' legal';if(bit(s.best,sq))c+=' best';if(inv)c+=' invalid';if(bit(s.check,sq))c+=' check';if(s.selected===sq)c+=' sel';let d=document.createElement('div');d.className=c;let text=isSetup?(phys?'\u25cf':(inv?sq:'')):cellPiece(s.fen,virtualSq(s,sq));d.textContent=text;let cc=document.createElement('span');cc.className='coord';cc.textContent=sq;d.appendChild(cc);b.appendChild(d);}}let lists=setupLists(s);let warn=(isSetup&&lists.missing.length+lists.extra.length>0)?'<div class=\"warn\">Fix red squares, then press Start again.</div>':'';let checkText=(s.state==='CHECK'||s.mode==='CHECKMATE')?'<div class=\"statusCheck\">'+s.state+'</div>':'';document.getElementById('info').innerHTML=checkText+'<b>Mode:</b> '+s.mode+'<br><b>State:</b> '+s.state+'<br><b>Turn:</b> '+s.turn_text+'<br><b>Orientation:</b> '+s.orientation+'<br><b>Selected:</b> '+s.selected+'<br><b>Legal:</b> '+s.legal_text+'<br><b>Best:</b> '+s.best_move;document.getElementById('captures').innerHTML='<div><b>White side captured</b><br>'+s.white_captured+'<br><b>Points:</b> '+s.white_score+'</div><div><b>Black side captured</b><br>'+s.black_captured+'<br><b>Points:</b> '+s.black_score+'</div>';document.getElementById('setup').innerHTML=warn+'<b>Missing:</b> '+(lists.missing.join(' ')||'-')+'<br><b>Extra:</b> '+(lists.extra.join(' ')||'-');document.getElementById('fen').textContent=s.fen;document.getElementById('pgn').textContent=s.pgn;}setInterval(update,500);update();</script></body></html>";
+    static const char html[] =
+        "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>Xadrez ESP32-S3</title><style>"
+        "body{font-family:Arial,sans-serif;background:#10131a;color:#eee;margin:18px}"
+        ".layout{display:flex;gap:24px;flex-wrap:wrap}.board{display:grid;grid-template-columns:repeat(8,58px);grid-template-rows:repeat(8,58px);border:4px solid #333}"
+        ".sq{width:58px;height:58px;display:flex;align-items:center;justify-content:center;font-size:36px;box-sizing:border-box;position:relative}"
+        ".light{background:#d9c09b;color:#111}.dark{background:#73543a;color:#111}.phys{box-shadow:inset 0 0 0 6px #285dff}.turn{box-shadow:inset 0 0 0 8px #4ba3ff}"
+        ".legal{background:#d8c52f!important}.best{background:#0b9f39!important}.invalid,.check{background:#c01818!important;color:#fff}.winner{background:#11802f!important}.loser{background:#b00020!important;color:#fff}"
+        ".sel{animation:blink .7s infinite}@keyframes blink{50%{filter:brightness(1.8)}}button{font-size:20px;margin:4px;padding:10px 18px}.box{background:#1d2430;padding:12px;margin:8px 0;border-radius:8px;max-width:760px}.fen{font-family:monospace;word-break:break-all;font-size:14px}"
+        "</style></head><body><h1>Xadrez físico ESP32-S3</h1><div><button onclick=\"startGame()\">Start</button>"
+        "<button onclick=\"promote('Q')\">Queen</button><button onclick=\"promote('R')\">Rook</button><button onclick=\"promote('B')\">Bishop</button><button onclick=\"promote('N')\">Knight</button></div>"
+        "<div class=\"layout\"><div class=\"board\" id=\"board\"></div><div><div class=\"box\" id=\"info\"></div><div class=\"box fen\" id=\"fen\"></div><div class=\"box fen\" id=\"pgn\"></div></div></div>"
+        "<script>const pcs={P:'♙',N:'♘',B:'♗',R:'♖',Q:'♕',K:'♔',p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};"
+        "function bit(arr,sq){let f=sq.charCodeAt(0)-97,r=sq.charCodeAt(1)-49;return ((arr[r]>>f)&1)!==0;}"
+        "async function startGame(){await fetch('/api/start',{method:'POST'});update();}async function promote(p){await fetch('/api/promote?p='+p,{method:'POST'});update();}"
+        "function cellPiece(fen,sq){let rows=fen.split(' ')[0].split('/');let r=8-parseInt(sq[1]),f=sq.charCodeAt(0)-97,x=0;for(const ch of rows[r]){if(ch>='1'&&ch<='8'){x+=parseInt(ch);}else{if(x===f)return pcs[ch]||'';x++;}}return '';}"
+        "async function update(){let s=await (await fetch('/api/state')).json();let b=document.getElementById('board');b.innerHTML='';for(let r=8;r>=1;r--){for(let f=0;f<8;f++){let sq=String.fromCharCode(97+f)+r;let c='sq '+(((r+f)%2)?'dark':'light');if(bit(s.physical,sq))c+=' phys';if(bit(s.turn,sq))c+=' turn';if(bit(s.legal,sq))c+=' legal';if(bit(s.best,sq))c+=' best';if(bit(s.invalid,sq))c+=' invalid';if(bit(s.check,sq))c+=' check';if(s.selected===sq)c+=' sel';let d=document.createElement('div');d.className=c;d.textContent=cellPiece(s.fen,sq);b.appendChild(d);}}document.getElementById('info').innerHTML='<b>Mode:</b> '+s.mode+'<br><b>State:</b> '+s.state+'<br><b>Turn:</b> '+s.turn_text+'<br><b>Selected:</b> '+s.selected+'<br><b>Legal:</b> '+s.legal_text+'<br><b>Best:</b> '+s.best;document.getElementById('fen').textContent=s.fen;document.getElementById('pgn').textContent=s.pgn;}setInterval(update,500);update();</script></body></html>";
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-    httpd_resp_set_hdr(req, "Pragma", "no-cache");
-    httpd_resp_set_hdr(req, "Expires", "0");
     return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
 }
-
-
 
 static void jsonArray8(char * dst, size_t len, const uint8_t map[8])
 {
@@ -1245,46 +821,31 @@ static void jsonArray8(char * dst, size_t len, const uint8_t map[8])
 
 static esp_err_t apiStateHandler(httpd_req_t * req)
 {
-    char chunk[4096U];
+    char chunk[HTTP_CHUNK_LEN];
     char physical[64];
     char turn[64];
     char legal[64];
     char best[64];
     char invalid[64];
     char check[64];
-    char setupExpected[64];
-    char capturedByWhite[96];
-    char capturedByBlack[96];
-    uint16_t whiteScore = 0U;
-    uint16_t blackScore = 0U;
     uint8_t turnMap[8] = {0U};
-    uint8_t expectedMap[8] = {0xFFU, 0xFFU, 0x00U, 0x00U, 0x00U, 0x00U, 0xFFU, 0xFFU};
-    const char * orientationText = "unassigned";
-    const char * turnText = "white";
 
-    buildCapturedMaterialText(CHESS_BLACK, capturedByWhite, sizeof(capturedByWhite), &whiteScore);
-    buildCapturedMaterialText(CHESS_WHITE, capturedByBlack, sizeof(capturedByBlack), &blackScore);
-
-    if (orientationKnown != 0U)
+    for (uint8_t rank = 0U; rank < 8U; rank++)
     {
-        orientationText = (orientationFlipRanks != 0U) ? "flipped" : "normal";
-        turnText = (game.side_to_move == CHESS_WHITE) ? "white" : "black";
+        turnMap[rank] = (game.side_to_move == CHESS_WHITE) ? 0U : 0U;
+    }
 
-        for (uint8_t row = 0U; row < 8U; row++)
+    for (uint8_t row = 0U; row < 8U; row++)
+    {
+        for (uint8_t col = 0U; col < 8U; col++)
         {
-            for (uint8_t col = 0U; col < 8U; col++)
+            chess_piece_t p = game.board[row][col];
+            if ((p.type != CHESS_EMPTY) && (p.color == game.side_to_move))
             {
-                chess_piece_t p = game.board[row][col];
-                if ((p.type != CHESS_EMPTY) && (p.color == game.side_to_move))
-                {
-                    setVirtualBit(turnMap, row, col);
-                }
+                uint8_t rank = (uint8_t)(7U - row);
+                turnMap[rank] = (uint8_t)(turnMap[rank] | ((uint8_t)(1U << col)));
             }
         }
-    }
-    else if (gameMode == GAME_MODE_RUNNING)
-    {
-        turnText = "white: first moved side";
     }
 
     jsonArray8(physical, sizeof(physical), physicalPresence);
@@ -1293,56 +854,34 @@ static esp_err_t apiStateHandler(httpd_req_t * req)
     jsonArray8(best, sizeof(best), bestMap);
     jsonArray8(invalid, sizeof(invalid), invalidMap);
     jsonArray8(check, sizeof(check), checkMap);
-    jsonArray8(setupExpected, sizeof(setupExpected), expectedMap);
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     (void)snprintf(
         chunk,
         sizeof(chunk),
-        "{\"mode\":\"%s\",\"state\":\"%s\",\"turn_text\":\"%s\",\"orientation\":\"%s\",\"fen\":\"%s\",\"pgn\":\"%s\",\"selected\":\"%s\",\"legal_text\":\"%s\",\"best_move\":\"%s\",\"white_captured\":\"%s\",\"black_captured\":\"%s\",\"white_score\":%u,\"black_score\":%u,\"physical\":%s,\"turn\":%s,\"legal\":%s,\"best\":%s,\"invalid\":%s,\"check\":%s,\"setup_expected\":%s}",
+        "{\"mode\":\"%s\",\"state\":\"%s\",\"turn_text\":\"%s\",\"fen\":\"%s\",\"pgn\":\"%s\",\"selected\":\"%s\",\"legal_text\":\"%s\",\"best\":\"%s\",\"physical\":%s,\"turn\":%s,\"legal\":%s,\"best_map\":%s,\"best\":\"%s\",\"invalid\":%s,\"check\":%s}",
         modeToText(gameMode),
         stateText,
-        turnText,
-        orientationText,
+        (game.side_to_move == CHESS_WHITE) ? "white" : "black",
         game.fen,
         game.pgn,
         (selectedValid != 0U) ? selectedSquare : "-",
         stateLegal,
         stateBest,
-        capturedByWhite,
-        capturedByBlack,
-        (unsigned int)whiteScore,
-        (unsigned int)blackScore,
         physical,
         turn,
         legal,
         best,
+        stateBest,
         invalid,
-        check,
-        setupExpected
+        check
     );
 
     return httpd_resp_sendstr(req, chunk);
 }
 
-
-
 static esp_err_t apiStartHandler(httpd_req_t * req)
 {
-    if ((gameMode == GAME_MODE_INVALID_LOCK) || (gameMode == GAME_MODE_SYNC_WAIT))
-    {
-        selectedValid = 0U;
-        selectedSquare[0] = '\0';
-        memset(legalMap, 0, sizeof(legalMap));
-        memset(bestMap, 0, sizeof(bestMap));
-        memset(invalidMap, 0, sizeof(invalidMap));
-        memset(checkMap, 0, sizeof(checkMap));
-        setMode(GAME_MODE_SETUP, "SETUP_RETRY");
-        updateSetupFeedback();
-        sendLedFrame(0U);
-    }
-
     game_command_t command = { GAME_COMMAND_START, CHESS_EMPTY };
     if (gameCommandQueue != NULL)
     {
