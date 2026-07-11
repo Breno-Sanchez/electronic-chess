@@ -63,3 +63,40 @@ Monitor only:
 Do not commit build output, managed components, logs, temporary files, or local credentials.
 
 All code, comments, identifiers, logs, commit messages, file names, and technical documentation must be in English.
+
+
+## WPA2 Enterprise credential provisioning
+
+Institutional Wi-Fi credentials are not stored in source code.
+
+Provision them locally with:
+
+`run chess provision`
+
+The command asks for SSID, EAP identity, username, and password in the terminal, creates an encrypted local archive under `secrets/`, generates a temporary NVS image, flashes it to the ESP32-S3 `nvs` partition, and deletes temporary plaintext files.
+
+Do not commit `secrets/`, logs, generated NVS images, or real credentials.
+
+## RTOS architecture
+
+The firmware uses static FreeRTOS tasks, pinned to cores when dual-core FreeRTOS is enabled.
+
+Runtime ownership model:
+
+- `sensor_task`: scans the reed matrix and publishes `sensor_event_t` messages.
+- `game_task`: owns chess state, board state, move validation, captures, infractions, check, checkmate, draw, and LED frame generation.
+- `led_task`: consumes `led_command_t` frames and renders the LED strip.
+- `network_task`: initializes APSTA networking and starts the local HTTP server.
+- HTTP handlers must not directly mutate game state. They enqueue commands or read protected state snapshots.
+
+Shared game state must be protected with `stateMutex`. New firmware behavior should preserve this ownership model.
+
+## Source layout
+
+- `main/include`: public component headers.
+- `main/src/app`: application entry point and task creation.
+- `main/src/chess`: chess rules and lightweight local engine.
+- `main/src/drivers`: hardware drivers such as reed matrix and LED strip.
+- `main/src/game`: game controller and state orchestration.
+- `main/src/net`: networking, credentials, and provisioning support.
+- `main/src/tools`: firmware-only utility modes such as LED mapping mode.

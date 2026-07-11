@@ -83,3 +83,8 @@ apply_*.py
 /tools/*.out
 # Xadrez runtime logs
 /logs/
+/secrets/
+/secrets/*.env
+/secrets/*.csv
+/secrets/*.bin
+/secrets/*.enc

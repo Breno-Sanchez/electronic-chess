@@ -447,7 +447,7 @@ int main(int argc, char ** argv)
         rc = 1;
     }
 
-    if (write_header(map, "main/led_map_generated.h") != 0)
+    if (write_header(map, "main/include/led_map_generated.h") != 0)
     {
         rc = 1;
     }
@@ -456,7 +456,7 @@ int main(int argc, char ** argv)
     {
         host_log(LOG_LEVEL_INFO, "accepted squares: %u", (unsigned int)accepted);
         host_log(LOG_LEVEL_INFO, "saved JSON: main/led_map.json");
-        host_log(LOG_LEVEL_INFO, "saved header: main/led_map_generated.h");
+        host_log(LOG_LEVEL_INFO, "saved header: main/include/led_map_generated.h");
         host_log(LOG_LEVEL_INFO, "monitor log: %s", argv[1]);
     }
 

@@ -7,6 +7,7 @@
 #include "app_types.h"
 #include "chess_engine.h"
 #include "chess_logic.h"
+#include "credentials.h"
 #include "esp_eap_client.h"
 #include "esp_err.h"
 #include "esp_event.h"
@@ -22,10 +23,13 @@
 #include "nvs_flash.h"
 #include "server.h"
 
+<<<<<<< Updated upstream:main/server.c
 #define WIFI_SSID_TXT              "PROVISION_WITH_RUN_CHESS"
 #define EAP_IDENTITY_TXT           "PROVISION_WITH_RUN_CHESS"
 #define EAP_USERNAME_TXT           "PROVISION_WITH_RUN_CHESS"
 #define EAP_PASSWORD_TXT           "PROVISION_WITH_RUN_CHESS"
+=======
+>>>>>>> Stashed changes:main/src/game/server.c
 #define SOFTAP_SSID_TXT            "XADREZ_ESP"
 #define SOFTAP_PASS_TXT            "xadrez12345"
 #define SOFTAP_CHANNEL             (1U)
@@ -37,6 +41,7 @@
 #define HTTP_CHUNK_LEN             (768U)
 #define GAME_COMMAND_QUEUE_LEN     (8U)
 #define START_RAINBOW_MS           (700U)
+#define CAPTURED_PIECE_SLOT_COUNT  (7U)
 
 typedef enum
 {
@@ -71,6 +76,8 @@ static QueueHandle_t gameCommandQueue = NULL;
 static SemaphoreHandle_t stateMutex = NULL;
 static httpd_handle_t httpServer = NULL;
 static uint8_t wifiConnected = 0U;
+static wifi_enterprise_credentials_t enterpriseCredentials;
+static uint8_t enterpriseCredentialsReady = 0U;
 
 static StaticQueue_t gameCommandQueueControl;
 static uint8_t gameCommandQueueStorage[GAME_COMMAND_QUEUE_LEN * sizeof(game_command_t)];
@@ -92,6 +99,8 @@ static char stateBest[APP_MOVE_TEXT_LEN] = "-----";
 static uint8_t winnerWhite = 0U;
 static uint8_t whiteInfractions = 0U;
 static uint8_t blackInfractions = 0U;
+static uint8_t capturedByWhiteCounts[CAPTURED_PIECE_SLOT_COUNT] = {0U};
+static uint8_t capturedByBlackCounts[CAPTURED_PIECE_SLOT_COUNT] = {0U};
 static uint32_t ledSequence = 1U;
 static uint8_t orientationKnown = 0U;
 static uint8_t orientationFlipRanks = 0U;
@@ -121,6 +130,8 @@ static bool applySelectedMove(uint8_t toRow, uint8_t toCol, chess_piece_type_t p
 static chess_piece_type_t selectorPromotionPiece(const char square[APP_SQUARE_TEXT_LEN]);
 static void updateCheckState(void);
 static void updateLegalTextFromMap(void);
+static void clearCapturedMaterial(void);
+static void recordCapturedPiece(chess_color_t capturingSide, chess_piece_t capturedPiece);
 static const char * modeToText(game_mode_t mode);
 static const char * orientationText(void);
 static const char * sensorStateText(sensor_piece_state_t state);
@@ -130,7 +141,7 @@ static void indexToText(uint8_t row, uint8_t col, char out[APP_SQUARE_TEXT_LEN])
 static void logBoardEvent(const sensor_event_t * event);
 
 static esp_err_t initNvs(void);
-static esp_err_t initEnterpriseAuth(void);
+static esp_err_t initEnterpriseAuth(const wifi_enterprise_credentials_t * credentials);
 static void eventHandler(void * arg, esp_event_base_t base, int32_t id, void * data);
 static esp_err_t startHttpServer(void);
 static esp_err_t rootHandler(httpd_req_t * req);
@@ -791,12 +802,31 @@ static int pieceMaterialValue(chess_piece_type_t type)
 
     switch (type)
     {
-        case CHESS_PAWN:   value = 1; break;
-        case CHESS_KNIGHT: value = 3; break;
-        case CHESS_BISHOP: value = 3; break;
-        case CHESS_ROOK:   value = 5; break;
-        case CHESS_QUEEN:  value = 9; break;
-        default:           value = 0; break;
+        case CHESS_PAWN:
+            value = 1;
+            break;
+
+        case CHESS_KNIGHT:
+            value = 3;
+            break;
+
+        case CHESS_BISHOP:
+            value = 3;
+            break;
+
+        case CHESS_ROOK:
+            value = 5;
+            break;
+
+        case CHESS_QUEEN:
+            value = 9;
+            break;
+
+        case CHESS_KING:
+        case CHESS_EMPTY:
+        default:
+            value = 0;
+            break;
     }
 
     return value;
@@ -808,49 +838,84 @@ static char pieceMaterialLetter(chess_piece_type_t type)
 
     switch (type)
     {
-        case CHESS_PAWN:   value = 'P'; break;
-        case CHESS_KNIGHT: value = 'N'; break;
-        case CHESS_BISHOP: value = 'B'; break;
-        case CHESS_ROOK:   value = 'R'; break;
-        case CHESS_QUEEN:  value = 'Q'; break;
-        default:           value = '-'; break;
+        case CHESS_PAWN:
+            value = 'P';
+            break;
+
+        case CHESS_KNIGHT:
+            value = 'N';
+            break;
+
+        case CHESS_BISHOP:
+            value = 'B';
+            break;
+
+        case CHESS_ROOK:
+            value = 'R';
+            break;
+
+        case CHESS_QUEEN:
+            value = 'Q';
+            break;
+
+        case CHESS_KING:
+        case CHESS_EMPTY:
+        default:
+            value = '-';
+            break;
     }
 
     return value;
 }
 
-static uint8_t initialPieceCount(chess_piece_type_t type)
+static void clearCapturedMaterial(void)
 {
-    uint8_t count = 0U;
-
-    switch (type)
-    {
-        case CHESS_PAWN:   count = 8U; break;
-        case CHESS_KNIGHT: count = 2U; break;
-        case CHESS_BISHOP: count = 2U; break;
-        case CHESS_ROOK:   count = 2U; break;
-        case CHESS_QUEEN:  count = 1U; break;
-        case CHESS_KING:   count = 1U; break;
-        default:           count = 0U; break;
-    }
-
-    return count;
+    (void)memset(capturedByWhiteCounts, 0, sizeof(capturedByWhiteCounts));
+    (void)memset(capturedByBlackCounts, 0, sizeof(capturedByBlackCounts));
 }
 
-static uint8_t currentPieceCount(chess_color_t color, chess_piece_type_t type)
+static void recordCapturedPiece(chess_color_t capturingSide, chess_piece_t capturedPiece)
+{
+    uint8_t * capturedCounts = NULL;
+
+    if ((capturedPiece.type == CHESS_EMPTY) ||
+        (capturedPiece.type == CHESS_KING) ||
+        ((uint32_t)capturedPiece.type >= CAPTURED_PIECE_SLOT_COUNT))
+    {
+        return;
+    }
+
+    if (capturingSide == CHESS_WHITE)
+    {
+        capturedCounts = capturedByWhiteCounts;
+    }
+    else if (capturingSide == CHESS_BLACK)
+    {
+        capturedCounts = capturedByBlackCounts;
+    }
+
+    if (capturedCounts != NULL)
+    {
+        if (capturedCounts[capturedPiece.type] < UINT8_MAX)
+        {
+            capturedCounts[capturedPiece.type]++;
+        }
+    }
+}
+
+static uint8_t capturedCountForSide(chess_color_t capturingSide, chess_piece_type_t type)
 {
     uint8_t count = 0U;
 
-    for (uint8_t row = 0U; row < 8U; row++)
+    if ((uint32_t)type < CAPTURED_PIECE_SLOT_COUNT)
     {
-        for (uint8_t col = 0U; col < 8U; col++)
+        if (capturingSide == CHESS_WHITE)
         {
-            chess_piece_t piece = chess_get_piece(&game, row, col);
-
-            if ((piece.color == color) && (piece.type == type))
-            {
-                count++;
-            }
+            count = capturedByWhiteCounts[type];
+        }
+        else if (capturingSide == CHESS_BLACK)
+        {
+            count = capturedByBlackCounts[type];
         }
     }
 
@@ -867,7 +932,7 @@ static void appendCaptureText(char * dst, size_t dstLen, size_t * pos, const cha
     *pos += (size_t)snprintf(&dst[*pos], dstLen - *pos, "%s", text);
 }
 
-static void buildCapturedMaterialText(chess_color_t capturedColor, char * dst, size_t dstLen, uint16_t * points)
+static void buildCapturedMaterialText(chess_color_t capturingSide, char * dst, size_t dstLen, uint16_t * points)
 {
     static const chess_piece_type_t order[5] = {
         CHESS_QUEEN, CHESS_ROOK, CHESS_BISHOP, CHESS_KNIGHT, CHESS_PAWN
@@ -886,9 +951,7 @@ static void buildCapturedMaterialText(chess_color_t capturedColor, char * dst, s
     for (uint8_t index = 0U; index < 5U; index++)
     {
         chess_piece_type_t type = order[index];
-        uint8_t initial = initialPieceCount(type);
-        uint8_t current = currentPieceCount(capturedColor, type);
-        uint8_t captured = (current < initial) ? (uint8_t)(initial - current) : 0U;
+        uint8_t captured = capturedCountForSide(capturingSide, type);
 
         if (captured != 0U)
         {
@@ -913,7 +976,6 @@ static void buildCapturedMaterialText(chess_color_t capturedColor, char * dst, s
 
     *points = score;
 }
-
 
 
 static void computeLiftHints(uint8_t row, uint8_t col)
@@ -972,6 +1034,7 @@ static bool applySelectedMove(uint8_t toRow, uint8_t toCol, chess_piece_type_t p
     char toPhysical[APP_SQUARE_TEXT_LEN];
     chess_piece_t movingPiece;
     chess_piece_t targetPiece;
+    chess_piece_t capturedPiece;
 
     if ((selectedValid == 0U) || (physicalSquareToVirtualIndex(selectedSquare, &fromRow, &fromCol) == false))
     {
@@ -989,6 +1052,27 @@ static bool applySelectedMove(uint8_t toRow, uint8_t toCol, chess_piece_type_t p
     virtualIndexToPhysicalSquare(toRow, toCol, toPhysical);
     movingPiece = chess_get_piece(&game, fromRow, fromCol);
     targetPiece = chess_get_piece(&game, toRow, toCol);
+    capturedPiece = targetPiece;
+
+    if ((capturedPiece.type == CHESS_EMPTY) &&
+        (movingPiece.type == CHESS_PAWN) &&
+        (fromCol != toCol) &&
+        (game.en_passant_row == (int8_t)toRow) &&
+        (game.en_passant_col == (int8_t)toCol))
+    {
+        uint8_t capturedRow = toRow;
+
+        if ((movingPiece.color == CHESS_WHITE) && (toRow > 0U))
+        {
+            capturedRow = (uint8_t)(toRow - 1U);
+        }
+        else if ((movingPiece.color == CHESS_BLACK) && (toRow < 7U))
+        {
+            capturedRow = (uint8_t)(toRow + 1U);
+        }
+
+        capturedPiece = chess_get_piece(&game, capturedRow, toCol);
+    }
 
     ESP_LOGI(
         TAG,
@@ -1032,11 +1116,12 @@ static bool applySelectedMove(uint8_t toRow, uint8_t toCol, chess_piece_type_t p
         return false;
     }
 
+    recordCapturedPiece(movingPiece.color, capturedPiece);
+    ESP_LOGI(TAG, "MOVE_OK physical=%s->%s virtual=%s->%s captured=%s/%s fen=%s pgn=%s next=%s", selectedSquare, toPhysical, fromText, toText, pieceColorText(capturedPiece.color), pieceTypeText(capturedPiece.type), game.fen, game.pgn, pieceColorText(game.side_to_move));
     selectedValid = 0U;
     selectedSquare[0] = '\0';
     pendingPromotionValid = 0U;
     clearMaps();
-    ESP_LOGI(TAG, "MOVE_OK physical=%s->%s virtual=%s->%s fen=%s pgn=%s next=%s", selectedSquare, toPhysical, fromText, toText, game.fen, game.pgn, pieceColorText(game.side_to_move));
 
     updateCheckState();
 
@@ -1066,6 +1151,7 @@ static void startGame(void)
     winnerWhite = 0U;
     whiteInfractions = 0U;
     blackInfractions = 0U;
+    clearCapturedMaterial();
     orientationKnown = 0U;
     orientationFlipRanks = 0U;
 
@@ -1381,21 +1467,39 @@ static esp_err_t initNvs(void)
     return err;
 }
 
-static esp_err_t initEnterpriseAuth(void)
+static esp_err_t initEnterpriseAuth(const wifi_enterprise_credentials_t * credentials)
 {
-    size_t identity_len = boundedStringLength(EAP_IDENTITY_TXT, EAP_MAX_LEN + 1U);
-    size_t username_len = boundedStringLength(EAP_USERNAME_TXT, EAP_MAX_LEN + 1U);
-    size_t password_len = boundedStringLength(EAP_PASSWORD_TXT, EAP_MAX_LEN + 1U);
+    size_t identity_len;
+    size_t username_len;
+    size_t password_len;
     esp_err_t err = ESP_ERR_INVALID_ARG;
 
-    if ((identity_len > 0U) && (identity_len <= EAP_MAX_LEN) &&
-        (username_len > 0U) && (username_len <= EAP_MAX_LEN) &&
-        (password_len > 0U) && (password_len <= EAP_MAX_LEN))
+    if ((credentials == NULL) || (credentials->valid == 0U))
     {
-        err = esp_eap_client_set_identity((const unsigned char *)EAP_IDENTITY_TXT, (int)identity_len);
-        if (err == ESP_OK) err = esp_eap_client_set_username((const unsigned char *)EAP_USERNAME_TXT, (int)username_len);
-        if (err == ESP_OK) err = esp_eap_client_set_password((const unsigned char *)EAP_PASSWORD_TXT, (int)password_len);
-        if (err == ESP_OK) err = esp_wifi_sta_enterprise_enable();
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    identity_len = boundedStringLength(credentials->identity, WIFI_ENTERPRISE_EAP_MAX_LEN + 1U);
+    username_len = boundedStringLength(credentials->username, WIFI_ENTERPRISE_EAP_MAX_LEN + 1U);
+    password_len = boundedStringLength(credentials->password, WIFI_ENTERPRISE_EAP_MAX_LEN + 1U);
+
+    if ((identity_len > 0U) && (identity_len <= WIFI_ENTERPRISE_EAP_MAX_LEN) &&
+        (username_len > 0U) && (username_len <= WIFI_ENTERPRISE_EAP_MAX_LEN) &&
+        (password_len > 0U) && (password_len <= WIFI_ENTERPRISE_EAP_MAX_LEN))
+    {
+        err = esp_eap_client_set_identity((const unsigned char *)credentials->identity, (int)identity_len);
+        if (err == ESP_OK)
+        {
+            err = esp_eap_client_set_username((const unsigned char *)credentials->username, (int)username_len);
+        }
+        if (err == ESP_OK)
+        {
+            err = esp_eap_client_set_password((const unsigned char *)credentials->password, (int)password_len);
+        }
+        if (err == ESP_OK)
+        {
+            err = esp_wifi_sta_enterprise_enable();
+        }
     }
 
     return err;
@@ -1408,8 +1512,18 @@ static void eventHandler(void * arg, esp_event_base_t base, int32_t id, void * d
 
     if ((base == WIFI_EVENT) && (id == WIFI_EVENT_STA_START))
     {
-        err = esp_wifi_connect();
-        if (err != ESP_OK) ESP_LOGE(TAG, "WiFi connect error: %ld", (long)err);
+        if (enterpriseCredentialsReady != 0U)
+        {
+            err = esp_wifi_connect();
+            if (err != ESP_OK)
+            {
+                ESP_LOGE(TAG, "WiFi connect error: %ld", (long)err);
+            }
+        }
+        else
+        {
+            ESP_LOGW(TAG, "WPA2 Enterprise STA credentials missing. SoftAP remains active.");
+        }
     }
     else if ((base == WIFI_EVENT) && (id == WIFI_EVENT_STA_DISCONNECTED))
     {
@@ -1419,8 +1533,14 @@ static void eventHandler(void * arg, esp_event_base_t base, int32_t id, void * d
             const wifi_event_sta_disconnected_t * const event = (const wifi_event_sta_disconnected_t *)data;
             ESP_LOGE(TAG, "WiFi disconnected. Reason: %u", (unsigned int)event->reason);
         }
-        err = esp_wifi_connect();
-        if (err != ESP_OK) ESP_LOGE(TAG, "WiFi reconnect error: %ld", (long)err);
+        if (enterpriseCredentialsReady != 0U)
+        {
+            err = esp_wifi_connect();
+            if (err != ESP_OK)
+            {
+                ESP_LOGE(TAG, "WiFi reconnect error: %ld", (long)err);
+            }
+        }
     }
     else if ((base == IP_EVENT) && (id == IP_EVENT_STA_GOT_IP))
     {
@@ -1444,6 +1564,22 @@ esp_err_t serverNetworkInit(void)
     size_t apSsidLen;
 
     err = initNvs();
+
+    if (err == ESP_OK)
+    {
+        esp_err_t credentialErr = credentialsLoad(&enterpriseCredentials);
+
+        if (credentialErr == ESP_OK)
+        {
+            enterpriseCredentialsReady = 1U;
+        }
+        else
+        {
+            enterpriseCredentialsReady = 0U;
+            ESP_LOGW(TAG, "WPA2 Enterprise STA will not connect until credentials are provisioned");
+        }
+    }
+
     if (err == ESP_OK) err = esp_netif_init();
     if (err == ESP_OK) err = esp_event_loop_create_default();
 
@@ -1460,7 +1596,11 @@ esp_err_t serverNetworkInit(void)
 
     if (err == ESP_OK)
     {
-        copyStringToU8(staCfg.sta.ssid, sizeof(staCfg.sta.ssid), WIFI_SSID_TXT);
+        if (enterpriseCredentialsReady != 0U)
+        {
+            copyStringToU8(staCfg.sta.ssid, sizeof(staCfg.sta.ssid), enterpriseCredentials.ssid);
+        }
+
         copyStringToU8(apCfg.ap.ssid, sizeof(apCfg.ap.ssid), SOFTAP_SSID_TXT);
         copyStringToU8(apCfg.ap.password, sizeof(apCfg.ap.password), SOFTAP_PASS_TXT);
         apSsidLen = boundedStringLength(SOFTAP_SSID_TXT, sizeof(apCfg.ap.ssid));
@@ -1480,8 +1620,17 @@ esp_err_t serverNetworkInit(void)
     }
 
     if (err == ESP_OK) err = esp_wifi_set_mode(WIFI_MODE_APSTA);
-    if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_STA, &staCfg);
-    if (err == ESP_OK) err = initEnterpriseAuth();
+
+    if ((err == ESP_OK) && (enterpriseCredentialsReady != 0U))
+    {
+        err = esp_wifi_set_config(WIFI_IF_STA, &staCfg);
+    }
+
+    if ((err == ESP_OK) && (enterpriseCredentialsReady != 0U))
+    {
+        err = initEnterpriseAuth(&enterpriseCredentials);
+    }
+
     if (err == ESP_OK) err = esp_wifi_set_config(WIFI_IF_AP, &apCfg);
     if (err == ESP_OK) err = esp_wifi_start();
     if (err == ESP_OK) err = esp_wifi_set_ps(WIFI_PS_NONE);
@@ -1560,9 +1709,21 @@ static esp_err_t apiStateHandler(httpd_req_t * req)
     uint8_t expectedMap[8] = {0xFFU, 0xFFU, 0x00U, 0x00U, 0x00U, 0x00U, 0xFFU, 0xFFU};
     const char * orientationText = "unassigned";
     const char * turnText = "white";
+    BaseType_t mutexTaken = pdFALSE;
 
-    buildCapturedMaterialText(CHESS_BLACK, capturedByWhite, sizeof(capturedByWhite), &whiteScore);
-    buildCapturedMaterialText(CHESS_WHITE, capturedByBlack, sizeof(capturedByBlack), &blackScore);
+    if (stateMutex != NULL)
+    {
+        mutexTaken = xSemaphoreTake(stateMutex, pdMS_TO_TICKS(1000U));
+        if (mutexTaken != pdPASS)
+        {
+            httpd_resp_set_status(req, "503 Service Unavailable");
+            httpd_resp_set_type(req, "application/json");
+            return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"state_lock_timeout\"}");
+        }
+    }
+
+    buildCapturedMaterialText(CHESS_WHITE, capturedByWhite, sizeof(capturedByWhite), &whiteScore);
+    buildCapturedMaterialText(CHESS_BLACK, capturedByBlack, sizeof(capturedByBlack), &blackScore);
 
     if (orientationKnown != 0U)
     {
@@ -1624,6 +1785,11 @@ static esp_err_t apiStateHandler(httpd_req_t * req)
         setupExpected
     );
 
+    if (mutexTaken == pdPASS)
+    {
+        (void)xSemaphoreGive(stateMutex);
+    }
+
     return httpd_resp_sendstr(req, chunk);
 }
 
@@ -1631,24 +1797,16 @@ static esp_err_t apiStateHandler(httpd_req_t * req)
 
 static esp_err_t apiStartHandler(httpd_req_t * req)
 {
-    if ((gameMode == GAME_MODE_INVALID_LOCK) || (gameMode == GAME_MODE_SYNC_WAIT))
-    {
-        selectedValid = 0U;
-        selectedSquare[0] = '\0';
-        memset(legalMap, 0, sizeof(legalMap));
-        memset(bestMap, 0, sizeof(bestMap));
-        memset(invalidMap, 0, sizeof(invalidMap));
-        memset(checkMap, 0, sizeof(checkMap));
-        setMode(GAME_MODE_SETUP, "SETUP_RETRY");
-        updateSetupFeedback();
-        sendLedFrame(0U);
-    }
+    game_command_t command;
 
-    game_command_t command = { GAME_COMMAND_START, CHESS_EMPTY };
+    command.type = GAME_COMMAND_START;
+    command.promotion = CHESS_EMPTY;
+
     if (gameCommandQueue != NULL)
     {
-        (void)xQueueSend(gameCommandQueue, &command, 0);
+        (void)xQueueSend(gameCommandQueue, &command, pdMS_TO_TICKS(200U));
     }
+
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
@@ -1707,7 +1865,12 @@ void serverTask(void * parameters)
 
     for (;;)
     {
-        processPendingCommands();
+        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(1000U)) == pdPASS)
+        {
+            processPendingCommands();
+            (void)xSemaphoreGive(stateMutex);
+        }
+
         status = xQueueReceive(sensorQueueRef, &event, pdMS_TO_TICKS(40U));
 
         if (status == pdPASS)

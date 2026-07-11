@@ -1,8 +1,10 @@
 if("$ENV{XADREZ_MAP_MODE}" STREQUAL "1")
     idf_component_register(
         SRCS
-            "led_map_mode.c"
-        INCLUDE_DIRS "."
+            "src/tools/led_map_mode.c"
+        INCLUDE_DIRS
+            "include"
+            "."
         PRIV_REQUIRES
             led_strip
             esp_driver_usb_serial_jtag
@@ -10,13 +12,16 @@ if("$ENV{XADREZ_MAP_MODE}" STREQUAL "1")
 else()
     idf_component_register(
         SRCS
-            "main.c"
-            "led.c"
-            "sensor.c"
-            "server.c"
-            "chess_logic.c"
-            "chess_engine.c"
-        INCLUDE_DIRS "."
+            "src/app/main.c"
+            "src/drivers/led.c"
+            "src/drivers/sensor.c"
+            "src/game/server.c"
+            "src/net/credentials.c"
+            "src/chess/chess_logic.c"
+            "src/chess/chess_engine.c"
+        INCLUDE_DIRS
+            "include"
+            "."
         PRIV_REQUIRES
             led_strip
             esp_driver_gpio
