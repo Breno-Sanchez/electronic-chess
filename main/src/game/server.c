@@ -1391,9 +1391,9 @@ static void startGame(void)
     orientationKnown = 1U;
     orientationFlipRanks = 0U;
     setMode(GAME_MODE_RUNNING, "RUNNING_WAIT_FIRST_WHITE");
-        /* BEST_REQUEST_AFTER_START */
+    /* BEST_REQUEST_AFTER_START */
     requestStockfishBestAsync();
-sendLedFrame(1U);
+    sendLedFrame(1U);
     vTaskDelay(pdMS_TO_TICKS(START_RAINBOW_MS));
     sendLedFrame(0U);
 }
@@ -1684,7 +1684,7 @@ esp_err_t serverInit(QueueHandle_t sensorQueue, QueueHandle_t ledQueue)
             stockfishResponseQueueStorage,
             &stockfishResponseQueueControl
         );
-if ((stateMutex != NULL) &&
+        if ((stateMutex != NULL) &&
             (gameCommandQueue != NULL) &&
             (stockfishRequestQueue != NULL) &&
             (stockfishResponseQueue != NULL))
