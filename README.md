@@ -1,4 +1,4 @@
-# Xadrez Eletrônico ESP32-S3
+# ESP32-S3 Electronic Chessboard
 
 Firmware for an ESP32-S3 electronic chessboard with reed-switch matrix sensing, LED board feedback, WPA2 Enterprise STA networking, fixed SoftAP access, and a local web interface.
 

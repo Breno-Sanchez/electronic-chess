@@ -1,4 +1,5 @@
 #include "stockfish_client.h"
+#include "runtime_config.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -209,7 +210,7 @@ bool stockfishClientAnalyzeFen(const char * fen, stockfish_client_result_t * res
     cfg = projectConfigGet();
     (void)memset(result, 0, sizeof(*result));
 
-    if ((cfg->stockfish_enabled == 0U) || (cfg->stockfish_url[0] == '\0'))
+    if ((runtimeConfigGet()->stockfish_enabled == 0U) || (cfg->stockfish_url[0] == '\0'))
     {
         ESP_LOGW(TAG, "StockfishOnline advisor disabled");
         return false;
@@ -237,7 +238,7 @@ bool stockfishClientAnalyzeFen(const char * fen, stockfish_client_result_t * res
         sizeof(url),
         "%s?depth=%u&fen=",
         cfg->stockfish_url,
-        (unsigned int)cfg->stockfish_depth
+        (unsigned int)runtimeConfigGet()->stockfish_depth
     );
 
     pos = boundedStringLength(url, sizeof(url));

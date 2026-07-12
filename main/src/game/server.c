@@ -22,6 +22,7 @@
 #include "nvs_flash.h"
 #include "server.h"
 #include "stockfish_client.h"
+#include "runtime_config.h"
 
 #define WIFI_SSID_TXT              "PROVISION_WITH_RUN_CHESS"
 #define EAP_IDENTITY_TXT           "PROVISION_WITH_RUN_CHESS"
@@ -124,6 +125,8 @@ static char stateBest[APP_MOVE_TEXT_LEN] = "-----";
 static uint8_t winnerWhite = 0U;
 static uint8_t whiteInfractions = 0U;
 static uint8_t blackInfractions = 0U;
+static uint8_t drawOfferActive = 0U;
+static uint8_t drawOfferByWhite = 0U;
 static uint8_t capturedByWhiteCounts[CAPTURED_PIECE_SLOT_COUNT] = {0U};
 static uint8_t capturedByBlackCounts[CAPTURED_PIECE_SLOT_COUNT] = {0U};
 static uint32_t ledSequence = 1U;
@@ -165,6 +168,7 @@ static void computeLiftHints(uint8_t row, uint8_t col);
 static bool applySelectedMove(uint8_t toRow, uint8_t toCol, chess_piece_type_t promotion);
 static chess_piece_type_t selectorPromotionPiece(const char square[APP_SQUARE_TEXT_LEN]);
 static void updateCheckState(void);
+static void updatePostMoveTerminalState(void);
 static void updateLegalTextFromMap(void);
 static void clearCapturedMaterial(void);
 static void recordCapturedPiece(chess_color_t capturingSide, chess_piece_t capturedPiece);
@@ -183,6 +187,7 @@ static esp_err_t startHttpServer(void);
 static esp_err_t rootHandler(httpd_req_t * req);
 static esp_err_t apiStateHandler(httpd_req_t * req);
 static esp_err_t apiStockfishHandler(httpd_req_t * req);
+static esp_err_t apiConfigHandler(httpd_req_t * req);
 static esp_err_t apiStartHandler(httpd_req_t * req);
 static esp_err_t apiPromoteHandler(httpd_req_t * req);
 static esp_err_t apiDrawHandler(httpd_req_t * req);
@@ -191,6 +196,8 @@ static const httpd_uri_t rootUri = {
  .uri = "/", .method = HTTP_GET, .handler = rootHandler, .user_ctx = NULL };
 static const httpd_uri_t stateUri = { .uri = "/api/state", .method = HTTP_GET, .handler = apiStateHandler, .user_ctx = NULL };
 static const httpd_uri_t stockfishUri = { .uri = "/api/stockfish", .method = HTTP_GET, .handler = apiStockfishHandler, .user_ctx = NULL };
+static const httpd_uri_t configGetUri = { .uri = "/api/config", .method = HTTP_GET, .handler = apiConfigHandler, .user_ctx = NULL };
+static const httpd_uri_t configPostUri = { .uri = "/api/config", .method = HTTP_POST, .handler = apiConfigHandler, .user_ctx = NULL };
 static const httpd_uri_t startUri = { .uri = "/api/start", .method = HTTP_POST, .handler = apiStartHandler, .user_ctx = NULL };
 static const httpd_uri_t promoteUri = { .uri = "/api/promote", .method = HTTP_POST, .handler = apiPromoteHandler, .user_ctx = NULL };
 static const httpd_uri_t drawUri = { .uri = "/api/draw", .method = HTTP_POST, .handler = apiDrawHandler, .user_ctx = NULL };
@@ -804,6 +811,51 @@ static void updateCheckState(void)
 }
 
 
+
+static void updatePostMoveTerminalState(void)
+{
+    chess_move_t moves[CHESS_MAX_MOVES];
+    uint32_t moveCount;
+    bool inCheck;
+
+    /* POST_MOVE_STALEMATE_CHECK */
+    updateCheckState();
+
+    if (gameMode == GAME_MODE_CHECKMATE_LOCK)
+    {
+        return;
+    }
+
+    moveCount = chess_generate_all_legal_moves(&game, moves, CHESS_MAX_MOVES);
+    inCheck = chess_is_check(&game, game.side_to_move);
+
+    if (moveCount == 0U)
+    {
+        if (inCheck != false)
+        {
+            winnerWhite = (game.side_to_move == CHESS_BLACK) ? 1U : 0U;
+            setMode(GAME_MODE_CHECKMATE_LOCK, "CHECKMATE");
+        }
+        else
+        {
+            declareDraw();
+            setMode(GAME_MODE_DRAW_LOCK, "STALEMATE");
+        }
+
+        return;
+    }
+
+    if (inCheck != false)
+    {
+        setMode(GAME_MODE_RUNNING, "CHECK");
+    }
+    else
+    {
+        setMode(GAME_MODE_RUNNING, "RUNNING");
+    }
+}
+
+
 static void registerInfraction(const char * reason)
 {
     uint8_t * counter;
@@ -811,6 +863,12 @@ static void registerInfraction(const char * reason)
 
     counter = (game.side_to_move == CHESS_WHITE) ? &whiteInfractions : &blackInfractions;
     sideText = (game.side_to_move == CHESS_WHITE) ? "white" : "black";
+
+    if (runtimeConfigGet()->invalid_position_infractions_enabled == 0U)
+    {
+        ESP_LOGW(TAG, "INFRACTION_DISABLED side=%s reason=%s", sideText, (reason != NULL) ? reason : "invalid move");
+        return;
+    }
 
     if (*counter < 2U)
     {
@@ -1091,7 +1149,7 @@ static void requestStockfishBestAsync(void)
 {
     stockfish_request_t request;
 
-    if ((stockfishRequestQueue == NULL) || (gameMode != GAME_MODE_RUNNING))
+    if ((stockfishRequestQueue == NULL) || (gameMode != GAME_MODE_RUNNING) || (runtimeConfigGet()->stockfish_enabled == 0U))
     {
         return;
     }
@@ -1343,22 +1401,17 @@ static bool applySelectedMove(uint8_t toRow, uint8_t toCol, chess_piece_type_t p
     pendingPromotionValid = 0U;
     clearMaps();
 
-    updateCheckState();
+    /* DRAW_OFFER_CLEAR_ON_MOVE */
+    drawOfferActive = 0U;
+    drawOfferByWhite = 0U;
 
-    if (gameMode != GAME_MODE_CHECKMATE_LOCK)
+    updatePostMoveTerminalState();
+
+    if (gameMode == GAME_MODE_RUNNING)
     {
-        if (chess_is_check(&game, game.side_to_move) == true)
-        {
-            setMode(GAME_MODE_RUNNING, "CHECK");
-        }
-        else
-        {
-            setMode(GAME_MODE_RUNNING, "RUNNING");
-        }
+        /* BEST_REQUEST_AFTER_MOVE */
+        requestStockfishBestAsync();
     }
-
-    /* BEST_REQUEST_AFTER_MOVE */
-    requestStockfishBestAsync();
 
     return true;
 }
@@ -1374,6 +1427,9 @@ static void startGame(void)
     winnerWhite = 0U;
     whiteInfractions = 0U;
     blackInfractions = 0U;
+    /* DRAW_OFFER_CLEAR_ON_START */
+    drawOfferActive = 0U;
+    drawOfferByWhite = 0U;
     clearCapturedMaterial();
     orientationKnown = 0U;
     orientationFlipRanks = 0U;
@@ -1826,6 +1882,7 @@ esp_err_t serverNetworkInit(void)
     size_t apSsidLen;
 
     err = initNvs();
+    if (err == ESP_OK) (void)runtimeConfigLoadFromNvs();
 
     if (err == ESP_OK)
     {
@@ -1923,6 +1980,8 @@ static esp_err_t startHttpServer(void)
         if (err == ESP_OK) err = httpd_register_uri_handler(httpServer, &rootUri);
         if (err == ESP_OK) err = httpd_register_uri_handler(httpServer, &stateUri);
         if (err == ESP_OK) err = httpd_register_uri_handler(httpServer, &stockfishUri);
+        if (err == ESP_OK) err = httpd_register_uri_handler(httpServer, &configGetUri);
+        if (err == ESP_OK) err = httpd_register_uri_handler(httpServer, &configPostUri);
         if (err == ESP_OK) err = httpd_register_uri_handler(httpServer, &startUri);
         if (err == ESP_OK) err = httpd_register_uri_handler(httpServer, &drawUri);
         if (err == ESP_OK) err = httpd_register_uri_handler(httpServer, &promoteUri);
@@ -1938,7 +1997,68 @@ static esp_err_t startHttpServer(void)
 
 static esp_err_t rootHandler(httpd_req_t * req)
 {
-    static const char html[] = "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Xadrez ESP32-S3</title><style>\nbody{font-family:Arial,sans-serif;background:#10131a;color:#eee;margin:18px}.layout{display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start}.board{display:grid;grid-template-columns:repeat(8,64px);grid-template-rows:repeat(8,64px);border:5px solid #222;background:#222}.sq{width:64px;height:64px;display:flex;align-items:center;justify-content:center;font-size:36px;box-sizing:border-box;position:relative;font-weight:700}.light{background:#d9c09b;color:#111}.dark{background:#73543a;color:#111}.coord{position:absolute;right:4px;bottom:3px;font-size:11px;opacity:.72}.phys{box-shadow:inset 0 0 0 6px #285dff}.turn{box-shadow:inset 0 0 0 8px #4ba3ff}.setupok{background:#064ec9!important;color:#fff;box-shadow:inset 0 0 0 4px #8bbcff}.legal{background:#d8c52f!important;color:#111}.best{background:#0b9f39!important;color:#fff}.invalid,.check{background:#c01818!important;color:#fff;box-shadow:inset 0 0 0 5px #ffb0b0}.sel{animation:blink .7s infinite}@keyframes blink{50%{filter:brightness(1.8)}}button{font-size:20px;margin:4px;padding:10px 18px;border-radius:8px;border:0}.box{background:#1d2430;padding:12px;margin:8px 0;border-radius:8px;max-width:900px}.fen{font-family:monospace;word-break:break-all;font-size:14px}.legend span{display:inline-block;padding:5px 8px;margin:3px;border-radius:5px}.blue{background:#064ec9}.red{background:#c01818}.yellow{background:#d8c52f;color:#111}.green{background:#0b9f39}.warn{font-size:18px;color:#ffd37a}.score{display:grid;grid-template-columns:1fr 1fr;gap:8px}.score div{background:#141a24;border-radius:6px;padding:8px}.statusCheck{color:#ffb0b0;font-weight:700;font-size:20px}</style></head><body><h1>Xadrez f\u00edsico ESP32-S3</h1><div><button onclick=\"startGame()\">Start</button><button onclick=\"promote('Q')\">Queen</button><button onclick=\"promote('R')\">Rook</button><button onclick=\"promote('B')\">Bishop</button><button onclick=\"promote('N')\">Knight</button><button onclick=\"drawGame()\">Draw</button></div><div class=\"box legend\"><span class=\"blue\">Setup blue = correct piece</span><span class=\"red\">Red = wrong/check</span><span class=\"yellow\">Legal move</span><span class=\"green\">Best StockfishOnline move</span></div><div class=\"layout\"><div class=\"board\" id=\"board\"></div><div><div class=\"box\" id=\"info\"></div><div class=\"box score\" id=\"captures\"></div><div class=\"box\" id=\"setup\"></div><div class=\"box fen\" id=\"fen\"></div><div class=\"box fen\" id=\"pgn\"></div><div class=\"box fen\" id=\"stockfish\"></div></div></div><script>\nconst pcs={P:'\u2659',N:'\u2658',B:'\u2657',R:'\u2656',Q:'\u2655',K:'\u2654',p:'\u265f',n:'\u265e',b:'\u265d',r:'\u265c',q:'\u265b',k:'\u265a'};function bit(arr,sq){let f=sq.charCodeAt(0)-97,r=sq.charCodeAt(1)-49;return Array.isArray(arr)&&((arr[r]>>f)&1)!==0;}async function startGame(){await fetch('/api/start',{method:'POST'});update();}async function promote(p){await fetch('/api/promote?p='+p,{method:'POST'});update();}async function drawGame(){await fetch('/api/draw',{method:'POST'});update();}\nfunction virtualSq(s,sq){if(s.orientation==='flipped'){let r=9-parseInt(sq[1]);return sq[0]+r;}return sq;}function cellPiece(fen,sq){let rows=fen.split(' ')[0].split('/');let r=8-parseInt(sq[1]),f=sq.charCodeAt(0)-97,x=0;if(!rows[r])return '';for(const ch of rows[r]){if(ch>='1'&&ch<='8'){x+=parseInt(ch);}else{if(x===f)return pcs[ch]||'';x++;}}return '';}\nfunction setupLists(s){let missing=[],extra=[];for(let r=1;r<=8;r++){for(let f=0;f<8;f++){let sq=String.fromCharCode(97+f)+r;if(bit(s.invalid,sq)){if(bit(s.physical,sq))extra.push(sq);else missing.push(sq);}}}return {missing,extra};}\nfunction hasCheck(s){for(let r=1;r<=8;r++){for(let f=0;f<8;f++){if(bit(s.check,String.fromCharCode(97+f)+r))return true;}}return false;}\nasync function update(){let s=await (await fetch('/api/state')).json();let b=document.getElementById('board');let isSetup=s.mode==='SETUP';let check=hasCheck(s);b.innerHTML='';for(let r=8;r>=1;r--){for(let f=0;f<8;f++){let sq=String.fromCharCode(97+f)+r;let phys=bit(s.physical,sq),inv=bit(s.invalid,sq);let c='sq '+(((r+f)%2)?'dark':'light');if(isSetup&&phys&&!inv)c+=' setupok';else if(phys)c+=' phys';if(bit(s.turn,sq))c+=' turn';if(bit(s.legal,sq))c+=' legal';if(bit(s.best,sq))c+=' best';if(inv)c+=' invalid';if(bit(s.check,sq))c+=' check';if(s.selected===sq)c+=' sel';let d=document.createElement('div');d.className=c;let text=isSetup?(phys?'\u25cf':(inv?sq:'')):cellPiece(s.fen,virtualSq(s,sq));d.textContent=text;let cc=document.createElement('span');cc.className='coord';cc.textContent=sq;d.appendChild(cc);b.appendChild(d);}}let lists=setupLists(s);let warn=(isSetup&&lists.missing.length+lists.extra.length>0)?'<div class=\"warn\">Fix red squares, then press Start again.</div>':'';let checkText=(s.state==='CHECK'||s.mode==='CHECKMATE')?'<div class=\"statusCheck\">'+s.state+'</div>':'';document.getElementById('info').innerHTML=checkText+'<b>Mode:</b> '+s.mode+'<br><b>State:</b> '+s.state+'<br><b>Turn:</b> '+s.turn_text+'<br><b>Orientation:</b> '+s.orientation+'<br><b>Selected:</b> '+s.selected+'<br><b>Legal:</b> '+s.legal_text+'<br><b>Best:</b> '+s.best_move;document.getElementById('captures').innerHTML='<div><b>White side captured</b><br>'+s.white_captured+'<br><b>Points:</b> '+s.white_score+'<br><b>Infractions:</b> '+(s.white_infractions||0)+'/2</div><div><b>Black side captured</b><br>'+s.black_captured+'<br><b>Points:</b> '+s.black_score+'<br><b>Infractions:</b> '+(s.black_infractions||0)+'/2</div>';document.getElementById('setup').innerHTML=warn+'<b>Missing:</b> '+(lists.missing.join(' ')||'-')+'<br><b>Extra:</b> '+(lists.extra.join(' ')||'-');document.getElementById('fen').textContent=s.fen;document.getElementById('pgn').textContent=s.pgn;fetch('/api/stockfish').then(r=>r.text()).then(t=>{document.getElementById('stockfish').textContent='Stockfish JSON: '+(t||'-');}).catch(()=>{document.getElementById('stockfish').textContent='Stockfish JSON: unavailable';});}setInterval(update,500);update();</script></body></html>";
+    static const char html[] =
+        "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>ESP32-S3 Electronic Chessboard</title>"
+        "<style>"
+        "body{font-family:Arial,sans-serif;background:#10131a;color:#eee;margin:18px}"
+        ".tabs{display:flex;gap:0;margin-bottom:0}.tabs button{border-radius:8px 8px 0 0;border:1px solid #344052;border-bottom:0;background:#1d2430;color:#eee}.tab{display:none}.tab.active{display:block;border:1px solid #344052;border-top:0;background:#141a24;padding:12px;border-radius:0 8px 8px 8px}"
+        "button{font-size:17px;margin:4px;padding:9px 13px;border-radius:8px;border:0;cursor:pointer;background:#d7dce8;color:#111}"
+        ".layout{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}.side{background:#1d2430;padding:10px;border-radius:8px}"
+        ".board{display:grid;grid-template-columns:repeat(8,58px);grid-template-rows:repeat(8,58px);border:5px solid #222;background:#222}"
+        ".sq{width:58px;height:58px;display:flex;align-items:center;justify-content:center;font-size:32px;box-sizing:border-box;position:relative;font-weight:700}"
+        ".light{background:#d9c09b;color:#111}.dark{background:#73543a;color:#111}.coord{position:absolute;right:3px;bottom:2px;font-size:10px;opacity:.75}"
+        ".phys{box-shadow:inset 0 0 0 5px #285dff}.turn{box-shadow:inset 0 0 0 7px #4ba3ff}.setupok{background:#064ec9!important;color:#fff}"
+        ".legal{background:#d8c52f!important;color:#111}.best{background:#0b9f39!important;color:#fff}.invalid,.check{background:#c01818!important;color:#fff;box-shadow:inset 0 0 0 5px #ffb0b0}"
+        ".sel{animation:blink .7s infinite}@keyframes blink{50%{filter:brightness(1.8)}}"
+        ".box{background:#1d2430;padding:12px;margin:8px 0;border-radius:8px;max-width:920px}.fen{font-family:monospace;word-break:break-all;font-size:14px}"
+        ".score{display:grid;grid-template-columns:1fr 1fr;gap:8px}.score div{background:#141a24;border-radius:6px;padding:8px}"
+        ".warn,.drawState{font-size:16px;color:#ffd37a;font-weight:700}.statusCheck{color:#ffb0b0;font-weight:700;font-size:20px}"
+        ".grid{display:grid;grid-template-columns:230px 170px;gap:10px;align-items:center}.grid input[type=color]{width:90px;height:36px}.grid input[type=range]{width:190px}"
+        ".small{font-size:13px;color:#b8c4d6}.side button{display:block;width:100%;margin:6px 0}"
+        "</style></head><body>"
+        "<h1>ESP32-S3 Electronic Chessboard</h1>"
+        "<div class=\"tabs\"><button onclick=\"showTab('boardTab')\">Board</button><button onclick=\"showTab('configTab')\">Configuration</button></div>"
+        "<div id=\"boardTab\" class=\"tab active\">"
+        "<div><button onclick=\"startGame()\">Start</button><button onclick=\"promote('Q')\">Queen</button><button onclick=\"promote('R')\">Rook</button><button onclick=\"promote('B')\">Bishop</button><button onclick=\"promote('N')\">Knight</button></div>"
+        "<div id=\"drawInfo\" class=\"box drawState\">No active draw offer.</div>"
+        "<div class=\"layout\">"
+        "<div class=\"side\"><h3>White draw</h3><button onclick=\"drawAction('propose','white')\">Propose draw</button><button onclick=\"drawAction('accept','white')\">Accept black offer</button><button onclick=\"drawAction('reject','white')\">Reject black offer</button></div>"
+        "<div class=\"board\" id=\"board\"></div>"
+        "<div class=\"side\"><h3>Black draw</h3><button onclick=\"drawAction('propose','black')\">Propose draw</button><button onclick=\"drawAction('accept','black')\">Accept white offer</button><button onclick=\"drawAction('reject','black')\">Reject white offer</button></div>"
+        "<div><div class=\"box\" id=\"info\"></div><div class=\"box score\" id=\"captures\"></div><div class=\"box\" id=\"setup\"></div><div class=\"box fen\" id=\"fen\"></div><div class=\"box fen\" id=\"pgn\"></div><div class=\"box fen\" id=\"stockfish\"></div></div>"
+        "</div></div>"
+        "<div id=\"configTab\" class=\"tab\">"
+        "<div class=\"box\"><h2>Runtime configuration</h2><div class=\"grid\">"
+        "<label>Invalid-position infractions</label><input id=\"cfgInfractions\" type=\"checkbox\"><label>Empty square LEDs</label><input id=\"cfgEmptyEnabled\" type=\"checkbox\"><label>StockfishOnline advisor</label><input id=\"cfgStockfishEnabled\" type=\"checkbox\"><label>Stockfish depth</label><select id=\"cfgStockfishDepth\"><option>10</option><option>11</option><option>12</option><option>13</option><option>14</option><option>15</option></select>"
+        "<label>LED brightness</label><input id=\"cfgBrightness\" type=\"range\" min=\"0\" max=\"100\" oninput=\"document.getElementById('brightnessText').textContent=this.value+'%'\">"
+        "<span></span><span id=\"brightnessText\">-</span>"
+        "<label>Empty square</label><input id=\"cfgEmpty\" type=\"color\">"
+        "<label>Piece present</label><input id=\"cfgPiece\" type=\"color\">"
+        "<label>Lifted / own turn</label><input id=\"cfgLifted\" type=\"color\">"
+        "<label>Legal move</label><input id=\"cfgLegal\" type=\"color\">"
+        "<label>Best Stockfish move</label><input id=\"cfgBest\" type=\"color\">"
+        "<label>Invalid move</label><input id=\"cfgInvalid\" type=\"color\">"
+        "<label>Check</label><input id=\"cfgCheck\" type=\"color\">"
+        "<label>Draw</label><input id=\"cfgDraw\" type=\"color\">"
+        "</div><br><button onclick=\"saveConfig()\">Save configuration</button><button onclick=\"resetConfig()\">Default configuration</button><button onclick=\"loadConfig()\">Reload</button>"
+        "<div id=\"configStatus\" class=\"small\">-</div></div></div>"
+        "<script>"
+        "const pcs={P:'\\u2659',N:'\\u2658',B:'\\u2657',R:'\\u2656',Q:'\\u2655',K:'\\u2654',p:'\\u265f',n:'\\u265e',b:'\\u265d',r:'\\u265c',q:'\\u265b',k:'\\u265a'};"
+        "function el(id){return document.getElementById(id);}function showTab(id){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));el(id).classList.add('active');if(id==='configTab')loadConfig();}"
+        "function bit(arr,sq){let f=sq.charCodeAt(0)-97,r=sq.charCodeAt(1)-49;return Array.isArray(arr)&&((arr[r]>>f)&1)!==0;}"
+        "async function startGame(){await fetch('/api/start',{method:'POST'});update();}async function promote(p){await fetch('/api/promote?p='+p,{method:'POST'});update();}"
+        "async function drawAction(action,side){let r=await fetch('/api/draw?action='+action+'&side='+side,{method:'POST'});el('drawInfo').textContent=await r.text();update();}"
+        "function virtualSq(s,sq){if(s.orientation==='flipped'){let r=9-parseInt(sq[1]);return sq[0]+r;}return sq;}"
+        "function cellPiece(fen,sq){let rows=fen.split(' ')[0].split('/');let r=8-parseInt(sq[1]),f=sq.charCodeAt(0)-97,x=0;if(!rows[r])return '';for(const ch of rows[r]){if(ch>='1'&&ch<='8')x+=parseInt(ch);else{if(x===f)return pcs[ch]||'';x++;}}return '';}"
+        "function setupLists(s){let missing=[],extra=[];for(let r=1;r<=8;r++){for(let f=0;f<8;f++){let sq=String.fromCharCode(97+f)+r;if(bit(s.invalid,sq)){if(bit(s.physical,sq))extra.push(sq);else missing.push(sq);}}}return {missing,extra};}"
+        "function hasCheck(s){for(let r=1;r<=8;r++){for(let f=0;f<8;f++){if(bit(s.check,String.fromCharCode(97+f)+r))return true;}}return false;}"
+        "async function loadConfig(){try{let c=await (await fetch('/api/config')).json();el('cfgInfractions').checked=!!c.infractions;el('cfgEmptyEnabled').checked=!!c.empty_enabled;el('cfgStockfishEnabled').checked=!!c.stockfish_enabled;el('cfgStockfishDepth').value=c.stockfish_depth;el('cfgBrightness').value=c.brightness;el('brightnessText').textContent=c.brightness+'%';el('cfgEmpty').value=c.empty;el('cfgPiece').value=c.piece;el('cfgLifted').value=c.lifted;el('cfgLegal').value=c.legal;el('cfgBest').value=c.best;el('cfgInvalid').value=c.invalid;el('cfgCheck').value=c.check;el('cfgDraw').value=c.draw;el('configStatus').textContent='Loaded';}catch(e){el('configStatus').textContent='Config API unavailable';}}"
+        "async function resetConfig(){let r=await fetch('/api/config?reset=1',{method:'POST'});el('configStatus').textContent=await r.text();await loadConfig();update();}async function saveConfig(){let p=new URLSearchParams();p.set('infractions',el('cfgInfractions').checked?'1':'0');p.set('empty_enabled',el('cfgEmptyEnabled').checked?'1':'0');p.set('stockfish_enabled',el('cfgStockfishEnabled').checked?'1':'0');p.set('stockfish_depth',el('cfgStockfishDepth').value);p.set('brightness',el('cfgBrightness').value);p.set('empty',el('cfgEmpty').value.substring(1));p.set('piece',el('cfgPiece').value.substring(1));p.set('lifted',el('cfgLifted').value.substring(1));p.set('legal',el('cfgLegal').value.substring(1));p.set('best',el('cfgBest').value.substring(1));p.set('invalid',el('cfgInvalid').value.substring(1));p.set('check',el('cfgCheck').value.substring(1));p.set('draw',el('cfgDraw').value.substring(1));let r=await fetch('/api/config?'+p.toString(),{method:'POST'});el('configStatus').textContent=await r.text();update();}"
+        "async function update(){let s=await (await fetch('/api/state')).json();let b=el('board');let isSetup=s.mode==='SETUP';b.innerHTML='';for(let r=8;r>=1;r--){for(let f=0;f<8;f++){let sq=String.fromCharCode(97+f)+r;let phys=bit(s.physical,sq),inv=bit(s.invalid,sq);let c='sq '+(((r+f)%2)?'dark':'light');if(isSetup&&phys&&!inv)c+=' setupok';else if(phys)c+=' phys';if(bit(s.turn,sq))c+=' turn';if(bit(s.legal,sq))c+=' legal';if(bit(s.best,sq))c+=' best';if(inv)c+=' invalid';if(bit(s.check,sq))c+=' check';if(s.selected===sq)c+=' sel';let d=document.createElement('div');d.className=c;d.textContent=isSetup?(phys?'\\u25cf':(inv?sq:'')):cellPiece(s.fen,virtualSq(s,sq));let cc=document.createElement('span');cc.className='coord';cc.textContent=sq;d.appendChild(cc);b.appendChild(d);}}let lists=setupLists(s);let warn=(isSetup&&lists.missing.length+lists.extra.length>0)?'<div class=\"warn\">Fix red squares, then press Start again.</div>':'';let checkText=(s.state==='CHECK'||s.state==='CHECKMATE')?'<div class=\"statusCheck\">'+s.state+'</div>':'';el('drawInfo').textContent=s.draw_offer?('Draw offered by '+s.draw_offer_by+'. Opponent may accept or reject.'):((s.state==='DRAW'||s.state==='STALEMATE')?('Game result: '+s.state):'No active draw offer.');el('info').innerHTML=checkText+'<b>Mode:</b> '+s.mode+'<br><b>State:</b> '+s.state+'<br><b>Turn:</b> '+s.turn_text+'<br><b>Orientation:</b> '+s.orientation+'<br><b>Selected:</b> '+s.selected+'<br><b>Legal:</b> '+s.legal_text+'<br><b>Best:</b> '+s.best_move;el('captures').innerHTML='<div><b>White side captured</b><br>'+s.white_captured+'<br><b>Points:</b> '+s.white_score+'<br><b>Infractions:</b> '+(s.white_infractions||0)+'/2</div><div><b>Black side captured</b><br>'+s.black_captured+'<br><b>Points:</b> '+s.black_score+'<br><b>Infractions:</b> '+(s.black_infractions||0)+'/2</div>';el('setup').innerHTML=warn+'<b>Missing:</b> '+(lists.missing.join(' ')||'-')+'<br><b>Extra:</b> '+(lists.extra.join(' ')||'-');el('fen').textContent=s.fen;el('pgn').textContent=s.pgn;fetch('/api/stockfish').then(r=>r.text()).then(t=>{el('stockfish').textContent='Stockfish JSON: '+(t||'-');}).catch(()=>{el('stockfish').textContent='Stockfish JSON: unavailable';});}"
+        "setInterval(update,500);update();loadConfig();"
+        "</script></body></html>";
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
@@ -1954,6 +2074,267 @@ static void jsonArray8(char * dst, size_t len, const uint8_t map[8])
     (void)snprintf(dst, len, "[%u,%u,%u,%u,%u,%u,%u,%u]", map[0], map[1], map[2], map[3], map[4], map[5], map[6], map[7]);
 }
 
+
+/* CONFIG_HANDLER_HELPERS */
+static uint32_t parseQueryUint(const char * text, uint32_t fallback, uint32_t maxValue)
+{
+    uint32_t value = 0U;
+    bool any = false;
+
+    if (text == NULL)
+    {
+        return fallback;
+    }
+
+    for (size_t index = 0U; text[index] != '\0'; index++)
+    {
+        if ((text[index] >= '0') && (text[index] <= '9'))
+        {
+            value = (value * 10U) + (uint32_t)(text[index] - '0');
+            any = true;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (any == false)
+    {
+        value = fallback;
+    }
+
+    if (value > maxValue)
+    {
+        value = maxValue;
+    }
+
+    return value;
+}
+
+static uint8_t queryBoolValue(const char * query, const char * key, uint8_t fallback)
+{
+    char value[8];
+
+    if ((query != NULL) &&
+        (key != NULL) &&
+        (httpd_query_key_value(query, key, value, sizeof(value)) == ESP_OK))
+    {
+        if ((value[0] == '0') || (value[0] == 'f') || (value[0] == 'F') ||
+            (value[0] == 'n') || (value[0] == 'N'))
+        {
+            return 0U;
+        }
+
+        return 1U;
+    }
+
+    return fallback;
+}
+
+static uint8_t queryUint8Value(const char * query, const char * key, uint8_t fallback, uint8_t maxValue)
+{
+    char value[16];
+
+    if ((query != NULL) &&
+        (key != NULL) &&
+        (httpd_query_key_value(query, key, value, sizeof(value)) == ESP_OK))
+    {
+        return (uint8_t)parseQueryUint(value, fallback, maxValue);
+    }
+
+    return fallback;
+}
+
+static bool hexNibble(char ch, uint8_t * value)
+{
+    bool ok = true;
+
+    if (value == NULL)
+    {
+        return false;
+    }
+
+    if ((ch >= '0') && (ch <= '9'))
+    {
+        *value = (uint8_t)(ch - '0');
+    }
+    else if ((ch >= 'a') && (ch <= 'f'))
+    {
+        *value = (uint8_t)(10U + (uint8_t)(ch - 'a'));
+    }
+    else if ((ch >= 'A') && (ch <= 'F'))
+    {
+        *value = (uint8_t)(10U + (uint8_t)(ch - 'A'));
+    }
+    else
+    {
+        ok = false;
+    }
+
+    return ok;
+}
+
+static bool parseHexColor(const char * text, project_rgb_t * color)
+{
+    uint8_t n[6];
+    size_t offset = 0U;
+
+    if ((text == NULL) || (color == NULL))
+    {
+        return false;
+    }
+
+    if (text[0] == '#')
+    {
+        offset = 1U;
+    }
+
+    for (uint8_t index = 0U; index < 6U; index++)
+    {
+        if (hexNibble(text[offset + index], &n[index]) == false)
+        {
+            return false;
+        }
+    }
+
+    color->r = (uint8_t)((n[0] << 4U) | n[1]);
+    color->g = (uint8_t)((n[2] << 4U) | n[3]);
+    color->b = (uint8_t)((n[4] << 4U) | n[5]);
+
+    return true;
+}
+
+static void applyColorQuery(const char * query, const char * key, runtime_led_color_id_t colorId)
+{
+    char value[16];
+    project_rgb_t color;
+
+    if ((query != NULL) &&
+        (key != NULL) &&
+        (httpd_query_key_value(query, key, value, sizeof(value)) == ESP_OK) &&
+        (parseHexColor(value, &color) != false))
+    {
+        (void)runtimeConfigSetLedColor(colorId, color);
+    }
+}
+
+static void appendColorJson(char * dst, size_t dstLen, size_t * pos, const char * key, project_rgb_t color)
+{
+    if ((dst == NULL) || (pos == NULL) || (key == NULL) || (*pos >= dstLen))
+    {
+        return;
+    }
+
+    *pos += (size_t)snprintf(
+        &dst[*pos],
+        dstLen - *pos,
+        ",\"%s\":\"#%02X%02X%02X\"",
+        key,
+        (unsigned int)color.r,
+        (unsigned int)color.g,
+        (unsigned int)color.b
+    );
+}
+
+static esp_err_t apiConfigHandler(httpd_req_t * req)
+{
+    char query[384];
+    char response[768];
+    size_t pos = 0U;
+    const runtime_config_t * cfg;
+
+    if (req == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    query[0] = '\0';
+
+    if ((req->method == HTTP_POST) &&
+        (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK))
+    {
+        const runtime_config_t * current = runtimeConfigGet();
+
+        if (queryBoolValue(query, "reset", 0U) != 0U)
+        {
+            (void)runtimeConfigReset();
+            sendLedFrame(0U);
+            cfg = runtimeConfigGet();
+        }
+        else
+        {
+
+        (void)runtimeConfigSetInvalidPositionInfractions(
+            queryBoolValue(query, "infractions", current->invalid_position_infractions_enabled)
+        );
+
+        (void)runtimeConfigSetLedEmptyEnabled(
+            queryBoolValue(query, "empty_enabled", current->led_empty_enabled)
+        );
+
+        (void)runtimeConfigSetStockfishEnabled(
+            queryBoolValue(query, "stockfish_enabled", current->stockfish_enabled)
+        );
+
+        (void)runtimeConfigSetStockfishDepth(
+            queryUint8Value(query, "stockfish_depth", current->stockfish_depth, 15U)
+        );
+
+        (void)runtimeConfigSetLedBrightness(
+            queryUint8Value(query, "brightness", current->led_brightness_percent, 100U)
+        );
+
+        applyColorQuery(query, "empty", RUNTIME_LED_COLOR_EMPTY);
+        applyColorQuery(query, "piece", RUNTIME_LED_COLOR_PIECE);
+        applyColorQuery(query, "lifted", RUNTIME_LED_COLOR_LIFTED);
+        applyColorQuery(query, "legal", RUNTIME_LED_COLOR_LEGAL);
+        applyColorQuery(query, "best", RUNTIME_LED_COLOR_BEST);
+        applyColorQuery(query, "invalid", RUNTIME_LED_COLOR_INVALID);
+        applyColorQuery(query, "check", RUNTIME_LED_COLOR_CHECK);
+        applyColorQuery(query, "draw", RUNTIME_LED_COLOR_DRAW);
+
+        sendLedFrame(0U);
+        }
+    }
+
+    cfg = runtimeConfigGet();
+
+    pos += (size_t)snprintf(
+        response,
+        sizeof(response),
+        "{\"infractions\":%u,\"empty_enabled\":%u,\"stockfish_enabled\":%u,\"stockfish_depth\":%u,\"brightness\":%u",
+        (unsigned int)cfg->invalid_position_infractions_enabled,
+        (unsigned int)cfg->led_empty_enabled,
+        (unsigned int)cfg->stockfish_enabled,
+        (unsigned int)cfg->stockfish_depth,
+        (unsigned int)cfg->led_brightness_percent
+    );
+
+    appendColorJson(response, sizeof(response), &pos, "empty", cfg->led_empty_rgb);
+    appendColorJson(response, sizeof(response), &pos, "piece", cfg->led_piece_rgb);
+    appendColorJson(response, sizeof(response), &pos, "lifted", cfg->led_lifted_rgb);
+    appendColorJson(response, sizeof(response), &pos, "legal", cfg->led_legal_rgb);
+    appendColorJson(response, sizeof(response), &pos, "best", cfg->led_best_rgb);
+    appendColorJson(response, sizeof(response), &pos, "invalid", cfg->led_invalid_rgb);
+    appendColorJson(response, sizeof(response), &pos, "check", cfg->led_check_rgb);
+    appendColorJson(response, sizeof(response), &pos, "draw", cfg->led_draw_rgb);
+
+    if (pos < (sizeof(response) - 2U))
+    {
+        response[pos] = '}';
+        response[pos + 1U] = '\0';
+    }
+    else
+    {
+        response[sizeof(response) - 2U] = '}';
+        response[sizeof(response) - 1U] = '\0';
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    return httpd_resp_sendstr(req, response);
+}
 
 static esp_err_t apiStockfishHandler(httpd_req_t * req)
 {
@@ -2000,6 +2381,7 @@ static esp_err_t apiStateHandler(httpd_req_t * req)
     uint8_t expectedMap[8] = {0xFFU, 0xFFU, 0x00U, 0x00U, 0x00U, 0x00U, 0xFFU, 0xFFU};
     const char * orientationText = "unassigned";
     const char * turnText = "white";
+    const char * drawOfferText = "none";
     BaseType_t mutexTaken = pdFALSE;
 
     if (stateMutex != NULL)
@@ -2038,6 +2420,11 @@ static esp_err_t apiStateHandler(httpd_req_t * req)
         turnText = "white: first moved side";
     }
 
+    if (drawOfferActive != 0U)
+    {
+        drawOfferText = (drawOfferByWhite != 0U) ? "white" : "black";
+    }
+
     jsonArray8(physical, sizeof(physical), physicalPresence);
     jsonArray8(turn, sizeof(turn), turnMap);
     jsonArray8(legal, sizeof(legal), legalMap);
@@ -2050,7 +2437,7 @@ static esp_err_t apiStateHandler(httpd_req_t * req)
     (void)snprintf(
         chunk,
         sizeof(chunk),
-        "{\"mode\":\"%s\",\"state\":\"%s\",\"turn_text\":\"%s\",\"orientation\":\"%s\",\"fen\":\"%s\",\"pgn\":\"%s\",\"selected\":\"%s\",\"legal_text\":\"%s\",\"best_move\":\"%s\",\"white_captured\":\"%s\",\"black_captured\":\"%s\",\"white_score\":%u,\"black_score\":%u,\"white_infractions\":%u,\"black_infractions\":%u,\"physical\":%s,\"turn\":%s,\"legal\":%s,\"best\":%s,\"invalid\":%s,\"check\":%s,\"setup_expected\":%s}",
+        "{\"mode\":\"%s\",\"state\":\"%s\",\"turn_text\":\"%s\",\"orientation\":\"%s\",\"fen\":\"%s\",\"pgn\":\"%s\",\"selected\":\"%s\",\"legal_text\":\"%s\",\"best_move\":\"%s\",\"white_captured\":\"%s\",\"black_captured\":\"%s\",\"white_score\":%u,\"black_score\":%u,\"white_infractions\":%u,\"black_infractions\":%u,\"draw_offer\":%u,\"draw_offer_by\":\"%s\",\"physical\":%s,\"turn\":%s,\"legal\":%s,\"best\":%s,\"invalid\":%s,\"check\":%s,\"setup_expected\":%s}",
         modeToText(gameMode),
         stateText,
         turnText,
@@ -2066,6 +2453,8 @@ static esp_err_t apiStateHandler(httpd_req_t * req)
         (unsigned int)blackScore,
         (unsigned int)whiteInfractions,
         (unsigned int)blackInfractions,
+        (unsigned int)drawOfferActive,
+        drawOfferText,
         physical,
         turn,
         legal,
@@ -2129,18 +2518,118 @@ static esp_err_t apiPromoteHandler(httpd_req_t * req)
 
 static esp_err_t apiDrawHandler(httpd_req_t * req)
 {
-    game_command_t command;
+    char query[96];
+    char action[16];
+    char sideText[8];
+    chess_color_t requestSide = CHESS_WHITE;
+    uint8_t sideValid = 0U;
+    const char * response = "{\"ok\":false,\"error\":\"bad_request\"}";
+    BaseType_t mutexTaken = pdFALSE;
 
-    command.type = GAME_COMMAND_DRAW;
-    command.promotion = CHESS_EMPTY;
-
-    if (gameCommandQueue != NULL)
+    if (req == NULL)
     {
-        (void)xQueueSend(gameCommandQueue, &command, pdMS_TO_TICKS(200U));
+        return ESP_ERR_INVALID_ARG;
     }
 
-    httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    return httpd_resp_sendstr(req, "OK");
+    query[0] = '\0';
+    action[0] = '\0';
+    sideText[0] = '\0';
+
+    if (req->method != HTTP_POST)
+    {
+        httpd_resp_set_status(req, "405 Method Not Allowed");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"method_not_allowed\"}");
+    }
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK)
+    {
+        (void)httpd_query_key_value(query, "action", action, sizeof(action));
+        (void)httpd_query_key_value(query, "side", sideText, sizeof(sideText));
+    }
+
+    if (strcmp(sideText, "white") == 0)
+    {
+        requestSide = CHESS_WHITE;
+        sideValid = 1U;
+    }
+    else if (strcmp(sideText, "black") == 0)
+    {
+        requestSide = CHESS_BLACK;
+        sideValid = 1U;
+    }
+
+    if ((action[0] == '\0') || (sideValid == 0U))
+    {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, response);
+    }
+
+    if (stateMutex != NULL)
+    {
+        mutexTaken = xSemaphoreTake(stateMutex, pdMS_TO_TICKS(1000U));
+    }
+
+    if (mutexTaken != pdPASS)
+    {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"state_lock_timeout\"}");
+    }
+
+    if (gameMode != GAME_MODE_RUNNING)
+    {
+        response = "{\"ok\":false,\"error\":\"game_not_running\"}";
+    }
+    else if (strcmp(action, "propose") == 0)
+    {
+        drawOfferActive = 1U;
+        drawOfferByWhite = (requestSide == CHESS_WHITE) ? 1U : 0U;
+        setMode(GAME_MODE_RUNNING, "DRAW_OFFERED");
+        sendLedFrame(0U);
+        response = "{\"ok\":true,\"draw_offer\":true}";
+    }
+    else if (strcmp(action, "accept") == 0)
+    {
+        const uint8_t requestByWhite = (requestSide == CHESS_WHITE) ? 1U : 0U;
+
+        if ((drawOfferActive != 0U) && (requestByWhite != drawOfferByWhite))
+        {
+            drawOfferActive = 0U;
+            declareDraw();
+            response = "{\"ok\":true,\"draw\":true}";
+        }
+        else
+        {
+            response = "{\"ok\":false,\"error\":\"no_opponent_draw_offer\"}";
+        }
+    }
+    else if (strcmp(action, "reject") == 0)
+    {
+        const uint8_t requestByWhite = (requestSide == CHESS_WHITE) ? 1U : 0U;
+
+        if ((drawOfferActive != 0U) && (requestByWhite != drawOfferByWhite))
+        {
+            drawOfferActive = 0U;
+            setMode(GAME_MODE_RUNNING, "DRAW_REJECTED");
+            sendLedFrame(0U);
+            response = "{\"ok\":true,\"draw_rejected\":true}";
+        }
+        else
+        {
+            response = "{\"ok\":false,\"error\":\"no_opponent_draw_offer\"}";
+        }
+    }
+    else
+    {
+        response = "{\"ok\":false,\"error\":\"unknown_draw_action\"}";
+    }
+
+    (void)xSemaphoreGive(stateMutex);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    return httpd_resp_sendstr(req, response);
 }
 
 

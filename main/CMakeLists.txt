@@ -7,6 +7,7 @@ else()
     set(XADREZ_MAIN_SRCS
         "src/app/main.c"
         "src/app/project_config.c"
+        "src/app/runtime_config.c"
         "src/chess/chess_logic.c"
         "src/chess/chess_engine.c"
         "src/drivers/led.c"

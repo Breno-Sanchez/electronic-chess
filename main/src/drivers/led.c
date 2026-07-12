@@ -10,12 +10,15 @@
 #include "led.h"
 #include "led_map_generated.h"
 #include "led_strip.h"
+#include "project_config.h"
+#include "runtime_config.h"
 
 #define LED_STRIP_GPIO              (38)
 #define LED_STRIP_LED_COUNT         (150U)
 #define RMT_RESOLUTION_HZ           (10000000U)
 #define RMT_MEM_BLOCK_SYMBOLS       (64U)
 #define BLINK_MS                    (250U)
+#define LED_GAME_MODE_DRAW_LOCK      (7U)
 
 #define WEAK_BLUE_R                 (0U)
 #define WEAK_BLUE_G                 (20U)
@@ -41,13 +44,19 @@ static led_command_t currentCommand;
 static uint8_t hasCommand = 0U;
 static uint8_t blinkPhase = 1U;
 static uint8_t rainbowPhase = 0U;
-static uint8_t ledIntensity = 35U;
 static uint8_t checkFlashFrames = 0U;
 static uint8_t checkPreviouslyActive = 0U;
 
+static uint32_t ledPhysicalCount(void)
+{
+    const project_config_t * cfg = projectConfigGet();
+    return cfg->led_physical_count;
+}
+
 static uint8_t scale(uint8_t value)
 {
-    return (uint8_t)(((uint32_t)value * (uint32_t)ledIntensity) / 100U);
+    const runtime_config_t * cfg = runtimeConfigGet();
+    return (uint8_t)(((uint32_t)value * (uint32_t)cfg->led_brightness_percent) / 100U);
 }
 
 static uint8_t squareToIndex(uint8_t rank, uint8_t file, uint32_t * index)
@@ -61,7 +70,7 @@ static uint8_t squareToIndex(uint8_t rank, uint8_t file, uint32_t * index)
 
     mapped = ledMapGenerated[rank][file];
 
-    if ((mapped == LED_MAP_INVALID_INDEX) || (mapped >= LED_STRIP_LED_COUNT))
+    if ((mapped == LED_MAP_INVALID_INDEX) || (mapped >= ledPhysicalCount()))
     {
         return 0U;
     }
@@ -92,6 +101,18 @@ static esp_err_t setSquareText(const char square[APP_SQUARE_TEXT_LEN], uint8_t r
     return setSquareRgb((uint8_t)(square[1] - '1'), (uint8_t)(square[0] - 'a'), r, g, b);
 }
 
+static esp_err_t setSquareColor(uint8_t rank, uint8_t file, runtime_led_color_id_t colorId)
+{
+    project_rgb_t color = runtimeConfigColor(colorId);
+    return setSquareRgb(rank, file, color.r, color.g, color.b);
+}
+
+static esp_err_t setSquareTextColor(const char square[APP_SQUARE_TEXT_LEN], runtime_led_color_id_t colorId)
+{
+    project_rgb_t color = runtimeConfigColor(colorId);
+    return setSquareText(square, color.r, color.g, color.b);
+}
+
 static esp_err_t clearAll(void)
 {
     esp_err_t err = ESP_OK;
@@ -101,7 +122,7 @@ static esp_err_t clearAll(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    for (uint32_t i = 0U; i < LED_STRIP_LED_COUNT; i++)
+    for (uint32_t i = 0U; i < ledPhysicalCount(); i++)
     {
         err = led_strip_set_pixel(ledStrip, i, 0U, 0U, 0U);
         if (err != ESP_OK)
@@ -171,6 +192,17 @@ static void renderRainbow(void)
     }
 }
 
+static void renderDraw(void)
+{
+    for (uint8_t rank = 0U; rank < 8U; rank++)
+    {
+        for (uint8_t file = 0U; file < 8U; file++)
+        {
+            (void)setSquareColor(rank, file, RUNTIME_LED_COLOR_DRAW);
+        }
+    }
+}
+
 static void renderMate(void)
 {
     uint16_t winnerLow = 0U;
@@ -207,16 +239,33 @@ static void renderMate(void)
         {
             if (winnerHalf != 0U)
             {
-                (void)setSquareRgb(rank, file, GREEN_R, GREEN_G, GREEN_B);
+                (void)setSquareColor(rank, file, RUNTIME_LED_COLOR_BEST);
             }
             else
             {
-                (void)setSquareRgb(rank, file, RED_R, RED_G, RED_B);
+                (void)setSquareColor(rank, file, RUNTIME_LED_COLOR_CHECK);
             }
         }
     }
 }
 
+
+
+static void renderEmptySquares(void)
+{
+    if (runtimeConfigGet()->led_empty_enabled == 0U)
+    {
+        return;
+    }
+
+    for (uint8_t rank = 0U; rank < 8U; rank++)
+    {
+        for (uint8_t file = 0U; file < 8U; file++)
+        {
+            (void)setSquareColor(rank, file, RUNTIME_LED_COLOR_EMPTY);
+        }
+    }
+}
 
 
 static esp_err_t render(void)
@@ -241,6 +290,15 @@ static esp_err_t render(void)
         return led_strip_refresh(ledStrip);
     }
 
+    if ((hasCommand != 0U) && (currentCommand.gameMode == LED_GAME_MODE_DRAW_LOCK))
+    {
+        renderDraw();
+        return led_strip_refresh(ledStrip);
+    }
+
+    /* EMPTY_SQUARE_RENDER_BASE */
+    renderEmptySquares();
+
     checkActive = mapHasAny(currentCommand.check);
 
     if ((checkActive != 0U) && (checkPreviouslyActive == 0U))
@@ -262,15 +320,15 @@ static esp_err_t render(void)
                 if ((currentCommand.sideToMove == LED_SIDE_WHITE) && ((currentCommand.whitePieces[rank] & bit) != 0U)) ownTurn = 1U;
                 if ((currentCommand.sideToMove == LED_SIDE_BLACK) && ((currentCommand.blackPieces[rank] & bit) != 0U)) ownTurn = 1U;
 
-                if (ownTurn != 0U) (void)setSquareRgb(rank, file, STRONG_BLUE_R, STRONG_BLUE_G, STRONG_BLUE_B);
-                else (void)setSquareRgb(rank, file, WEAK_BLUE_R, WEAK_BLUE_G, WEAK_BLUE_B);
+                if (ownTurn != 0U) (void)setSquareColor(rank, file, RUNTIME_LED_COLOR_LIFTED);
+                else (void)setSquareColor(rank, file, RUNTIME_LED_COLOR_PIECE);
             }
         }
     }
 
     if ((currentCommand.blinkActive != 0U) && (blinkPhase != 0U))
     {
-        (void)setSquareText(currentCommand.blinkSquare, STRONG_BLUE_R, STRONG_BLUE_G, STRONG_BLUE_B);
+        (void)setSquareTextColor(currentCommand.blinkSquare, RUNTIME_LED_COLOR_LIFTED);
     }
 
     for (uint8_t rank = 0U; rank < 8U; rank++)
@@ -278,9 +336,9 @@ static esp_err_t render(void)
         for (uint8_t file = 0U; file < 8U; file++)
         {
             uint8_t bit = (uint8_t)(1U << file);
-            if ((currentCommand.legal[rank] & bit) != 0U) (void)setSquareRgb(rank, file, YELLOW_R, YELLOW_G, YELLOW_B);
-            if ((currentCommand.best[rank] & bit) != 0U) (void)setSquareRgb(rank, file, GREEN_R, GREEN_G, GREEN_B);
-            if ((currentCommand.invalid[rank] & bit) != 0U) (void)setSquareRgb(rank, file, RED_R, RED_G, RED_B);
+            if ((currentCommand.legal[rank] & bit) != 0U) (void)setSquareColor(rank, file, RUNTIME_LED_COLOR_LEGAL);
+            if ((currentCommand.best[rank] & bit) != 0U) (void)setSquareColor(rank, file, RUNTIME_LED_COLOR_BEST);
+            if ((currentCommand.invalid[rank] & bit) != 0U) (void)setSquareColor(rank, file, RUNTIME_LED_COLOR_INVALID);
         }
     }
 
@@ -292,7 +350,7 @@ static esp_err_t render(void)
             {
                 for (uint8_t file = 0U; file < 8U; file++)
                 {
-                    (void)setSquareRgb(rank, file, RED_R, RED_G, RED_B);
+                    (void)setSquareColor(rank, file, RUNTIME_LED_COLOR_CHECK);
                 }
             }
         }
@@ -305,7 +363,7 @@ static esp_err_t render(void)
         for (uint8_t file = 0U; file < 8U; file++)
         {
             uint8_t bit = (uint8_t)(1U << file);
-            if ((currentCommand.check[rank] & bit) != 0U) (void)setSquareRgb(rank, file, RED_R, RED_G, RED_B);
+            if ((currentCommand.check[rank] & bit) != 0U) (void)setSquareColor(rank, file, RUNTIME_LED_COLOR_CHECK);
         }
     }
 
@@ -316,10 +374,14 @@ static esp_err_t render(void)
 
 void led_atualizar_config(uint8_t intensidade, uint8_t r, uint8_t g, uint8_t b)
 {
-    (void)r;
-    (void)g;
-    (void)b;
-    ledIntensity = (intensidade > 100U) ? 100U : intensidade;
+    project_rgb_t color;
+
+    color.r = r;
+    color.g = g;
+    color.b = b;
+
+    (void)runtimeConfigSetLedBrightness(intensidade);
+    (void)runtimeConfigSetLedColor(RUNTIME_LED_COLOR_PIECE, color);
 }
 
 void led_set_erro(const char * casa_origem, const char * casa_destino)
@@ -335,8 +397,8 @@ void led_limpar_erro(void)
 esp_err_t ledInit(QueueHandle_t queue)
 {
     led_strip_config_t stripConfig = {
-        .strip_gpio_num = LED_STRIP_GPIO,
-        .max_leds = LED_STRIP_LED_COUNT,
+        .strip_gpio_num = (int)projectConfigGet()->led_gpio,
+        .max_leds = projectConfigGet()->led_physical_count,
         .led_model = LED_MODEL_WS2812,
         .flags = { .invert_out = 0 }
     };
@@ -355,7 +417,7 @@ esp_err_t ledInit(QueueHandle_t queue)
     if (err == ESP_OK) err = clearAll();
     if (err == ESP_OK) err = led_strip_refresh(ledStrip);
 
-    ESP_LOGI(TAG, "LED strip GPIO %d, count %u", LED_STRIP_GPIO, (unsigned int)LED_STRIP_LED_COUNT);
+    ESP_LOGI(TAG, "LED strip GPIO %lu, count %lu", (unsigned long)projectConfigGet()->led_gpio, (unsigned long)projectConfigGet()->led_physical_count);
     return err;
 }
 
