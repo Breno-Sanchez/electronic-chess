@@ -1,25 +1,32 @@
 # ESP32-S3 Electronic Chessboard
 
-ESP32-S3 firmware for an electronic chessboard with reed-switch piece detection, addressable LED feedback, local chess-rule validation, APSTA networking, WPA2 Enterprise support, and a browser-based interface served from the board itself.
+<p align="center">
+  <a href="./REPORT.md"><b>Technical Report</b></a> ·
+  <a href="./LICENSE"><b>License</b></a>
+</p>
 
-The board detects magnetic pieces through an 8x8 reed matrix, maintains the authoritative virtual chess position, validates moves, records FEN/PGN, renders legal moves and game status on LEDs, and exposes the current state at:
+Firmware for an ESP32-S3 electronic chessboard with reed-switch piece detection, addressable LED feedback, local chess move validation, APSTA networking, WPA2 Enterprise support, a fixed SoftAP web interface, runtime configuration, historical game replay, chess clocks, and optional StockfishOnline move hints.
+
+The board detects magnetic chess pieces through an 8x8 reed-switch matrix. The ESP32-S3 keeps the authoritative virtual chess state, validates moves locally, updates FEN/PGN, drives the LEDs, and serves a browser interface at:
 
 ```text
 http://192.168.4.1/
 ```
 
-## Features
+## Main features
 
 - ESP32-S3 firmware using ESP-IDF v5.3.x.
-- 8x8 reed-switch matrix for physical piece presence.
-- Local chess state with legal move validation, FEN, PGN, captures, promotion, check, checkmate, stalemate, draw flow, and chess clocks.
-- Historical replay mode: select a stored historical game and replay only the expected PGN moves.
-- Addressable LED feedback through the ESP32-S3 RMT peripheral.
-- Fixed SoftAP interface for local access.
+- 8x8 reed-switch matrix for physical square occupancy.
+- Local chess rules, move validation, captures, promotion, castling, en passant, check, checkmate, stalemate, draw flow, and PGN/FEN tracking.
+- Historical game replay mode using embedded PGN data.
+- Chess clocks with configurable base time and increment.
+- WS2812-style LED feedback through ESP32-S3 RMT.
+- Fixed SoftAP interface at `http://192.168.4.1/`.
 - WPA2 Enterprise STA support for institutional Wi-Fi.
-- APSTA mode, allowing STA networking and SoftAP access at the same time.
-- Runtime web configuration for LED colors, brightness, StockfishOnline enable/depth, clock settings, and invalid-position handling.
-- Optional asynchronous StockfishOnline best-move hints.
+- APSTA mode: SoftAP and STA run at the same time.
+- Runtime configuration for LED brightness, colors, empty-square LEDs, Stockfish enable/disable, Stockfish depth, clock time, and clock increment.
+- Optional asynchronous StockfishOnline advisor.
+- Browser UI with board view, physical presence map, FEN, PGN, legal moves, best move, captured material, clocks, historical replay controls, and configuration controls.
 
 ## Hardware target
 
@@ -29,13 +36,11 @@ http://192.168.4.1/
 | Framework | ESP-IDF v5.3.x |
 | Serial port | `/dev/ttyACM0` |
 | LED output | GPIO38 |
-| Configured LED count | 150 |
-| Used board LEDs | 64 |
-| Skipped physical LEDs | 35 |
+| Web UI | `http://192.168.4.1/` |
 
-## Reed matrix pinout
+## Reed-switch matrix pinout
 
-The matrix scan model drives one column HIGH at a time. Rows are inputs with pulldown. A HIGH row reading during a column scan means that the corresponding reed switch is closed.
+The matrix scan drives one column HIGH at a time and reads the rows as pulldown inputs. A HIGH row reading means the reed switch at that square is closed.
 
 ### Rows / ranks
 
@@ -52,7 +57,7 @@ The matrix scan model drives one column HIGH at a time. Rows are inputs with pul
 
 ### Columns / files
 
-| Board file | GPIO |
+| Board column | GPIO |
 | --- | --- |
 | Column A | GPIO12 |
 | Column B | GPIO13 |
@@ -63,11 +68,17 @@ The matrix scan model drives one column HIGH at a time. Rows are inputs with pul
 | Column G | GPIO18 |
 | Column H | GPIO21 |
 
-## LED strip mapping
+## LED strip
 
-The LED strip is configured for 150 physical LEDs. Only 64 LEDs represent chessboard squares; 35 intermediate LEDs are intentionally skipped because of the physical routing.
+| Item | Value |
+| --- | --- |
+| Data GPIO | GPIO38 |
+| Used board LEDs | 64 |
+| Skipped LEDs | 35 |
+| Minimum physical LEDs | 99 |
+| Configured physical LEDs | 150 |
 
-Physical order from the first LED:
+Physical LED order from the first LED:
 
 ```text
 H1 to H8, skip 5 unused LEDs,
@@ -80,20 +91,21 @@ B1 to B8, skip 5 unused LEDs,
 A8 to A1.
 ```
 
-Default LED meanings:
+Default LED behavior:
 
-| State | LED behavior |
+| Board state | LED behavior |
 | --- | --- |
-| Empty square | Off by default |
+| Empty square | Off by default, configurable color when enabled |
 | Piece present | Weak blue |
-| Lifted origin | Blinking weak blue |
-| Legal destination | Yellow |
-| Best move / historical expected move | Green |
+| Lifted origin square | Blinking weak blue |
+| Legal moves | Yellow |
+| Stockfish or historical expected move | Green |
 | Invalid move | Red |
-| Check | Red board indication |
-| Checkmate | Winner side green, loser side red |
+| Check | Red check indication |
+| Draw | Configurable draw color |
+| Checkmate | Winner side blinks green, loser side blinks red |
 
-## Network
+## Network behavior
 
 The firmware runs in APSTA mode.
 
@@ -103,44 +115,26 @@ The firmware runs in APSTA mode.
 | --- | --- |
 | SSID | `XADREZ_ESP` |
 | Password | `xadrez12345` |
-| Local web UI | `http://192.168.4.1/` |
+| Local UI | `http://192.168.4.1/` |
 
 ### WPA2 Enterprise STA
 
-WPA2 Enterprise support is kept in the firmware for institutional Wi-Fi. Real credentials must not be committed to the repository. Provision credentials locally through NVS.
+WPA2 Enterprise support is enabled for institutional Wi-Fi. Real credentials must not be stored in source code. Credentials are provisioned locally into NVS.
 
-## Configuration
+## Build and flash
 
-Default runtime settings are embedded from:
-
-```text
-main/config.yaml
-```
-
-The firmware parses this file in C at runtime. Typical settings include SoftAP values, StockfishOnline defaults, LED GPIO/count/brightness, and default RGB values.
-
-Runtime changes made through the web Configuration tab are stored in NVS.
-
-## Build, flash, and monitor
-
-The preferred project helper is:
+Preferred build/flash workflow:
 
 ```bash
 run chess
 ```
 
-It loads the ESP-IDF environment, enters the project directory, sets the target to `esp32s3`, builds, flashes to `/dev/ttyACM0`, and opens the serial monitor.
+This loads the ESP-IDF environment, enters the project directory, sets the target to `esp32s3`, builds the firmware, flashes `/dev/ttyACM0`, and opens the serial monitor.
 
 Build only:
 
 ```bash
 run chess build
-```
-
-Flash and monitor:
-
-```bash
-run chess
 ```
 
 Monitor only:
@@ -149,44 +143,37 @@ Monitor only:
 run chess monitor
 ```
 
-Provision WPA2 Enterprise credentials:
+Provision WPA2 Enterprise credentials locally:
 
 ```bash
 run chess provision
 ```
 
-This provisions SSID, EAP identity, username, and password locally into NVS. Do not commit generated credential files or real credentials.
+The provisioning command asks for credentials locally, creates temporary NVS provisioning files, flashes the NVS partition, and avoids committing credentials to the repository.
 
 ## Source layout
 
 ```text
 main/include       Public component headers
 main/src/app       Application startup, runtime configuration, and task creation
-main/src/chess     Chess rules, FEN/PGN, historical replay parsing, and board logic
+main/src/chess     Chess rules, board state, FEN/PGN, historical games, and move validation
 main/src/drivers   Reed matrix scanner and LED strip renderer
-main/src/game      Game controller, HTTP API, web UI, move orchestration, and LED command generation
+main/src/game      Game controller, HTTP API, web UI, state orchestration, and LED command generation
 main/src/net       Wi-Fi, credential provisioning, and StockfishOnline HTTP client
 main/src/tools     Firmware utility modes
-main/web/data      Embedded web data, including historical PGN replay data
+main/web/data      Embedded historical game data
 ```
 
-## Main runtime tasks
+## Runtime configuration
 
-| Task | Responsibility |
-| --- | --- |
-| `sensor_task` | Scans the reed matrix and publishes physical board events |
-| `game_task` | Owns chess state, move validation, clocks, captures, draw/check/checkmate/stalemate logic, historical mode, and LED frame generation |
-| `led_task` | Renders LED command frames on the physical strip |
-| `network_task` | Initializes APSTA networking and starts the HTTP server |
-| `stockfish_task` | Performs optional asynchronous StockfishOnline requests |
+Default configuration is stored in:
 
-## Repository notes
+```text
+main/config.yaml
+```
 
-- `main` is the stable public branch.
-- Keep code, comments, identifiers, logs, commit messages, file names, and technical documentation in English.
-- Do not commit `build/`, logs, generated NVS images, temporary files, local credential archives, or real institutional credentials.
-- Keep WPA2 Enterprise support and the fixed SoftAP web interface.
+Runtime settings are stored in NVS and can be changed from the web Configuration tab.
 
 ## License
 
-See `LICENSE`.
+See [LICENSE](./LICENSE).
