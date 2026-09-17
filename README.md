@@ -17,10 +17,10 @@ http://192.168.4.1/
 
 - ESP32-S3 firmware using ESP-IDF v5.3.x.
 - 8x8 reed-switch matrix for physical square occupancy.
-- Local chess rules, move validation, captures, promotion, castling, en passant, check, checkmate, stalemate, draw flow, and PGN/FEN tracking.
+- Local chess rules, move validation, captures, promotion, castling, en passant, check, checkmate, stalemate, draw flow, and FEN/PGN tracking.
 - Historical game replay mode using embedded PGN data.
 - Chess clocks with configurable base time and increment.
-- WS2812-style LED feedback through ESP32-S3 RMT.
+- WS2812-style LED feedback through the ESP32-S3 RMT peripheral.
 - Fixed SoftAP interface at `http://192.168.4.1/`.
 - WPA2 Enterprise STA support for institutional Wi-Fi.
 - APSTA mode: SoftAP and STA run at the same time.
@@ -34,9 +34,9 @@ http://192.168.4.1/
 | --- | --- |
 | MCU | ESP32-S3 |
 | Framework | ESP-IDF v5.3.x |
-| Serial port | `/dev/ttyACM0` |
+| Default serial port | `/dev/ttyACM0` |
 | LED output | GPIO38 |
-| Web UI | `http://192.168.4.1/` |
+| Local web UI | `http://192.168.4.1/` |
 
 ## Reed-switch matrix pinout
 
@@ -69,6 +69,8 @@ The matrix scan drives one column HIGH at a time and reads the rows as pulldown 
 | Column H | GPIO21 |
 
 ## LED strip
+
+The LED strip is driven by the ESP32-S3 RMT peripheral.
 
 | Item | Value |
 | --- | --- |
@@ -117,39 +119,104 @@ The firmware runs in APSTA mode.
 | Password | `xadrez12345` |
 | Local UI | `http://192.168.4.1/` |
 
+The SoftAP remains available even when the STA interface is not connected.
+
 ### WPA2 Enterprise STA
 
-WPA2 Enterprise support is enabled for institutional Wi-Fi. Real credentials must not be stored in source code. Credentials are provisioned locally into NVS.
+WPA2 Enterprise support is enabled for institutional Wi-Fi. Real credentials must not be stored in source code or committed to the repository. Credentials are provisioned locally into NVS.
 
-## Build and flash
+## How to run the project
 
-Preferred build/flash workflow:
+### 1. Install ESP-IDF
 
-```bash
-run chess
-```
+Install ESP-IDF v5.3.x and load the ESP-IDF environment in the current terminal before building.
 
-This loads the ESP-IDF environment, enters the project directory, sets the target to `esp32s3`, builds the firmware, flashes `/dev/ttyACM0`, and opens the serial monitor.
-
-Build only:
+Example for a standard ESP-IDF installation on Linux:
 
 ```bash
-run chess build
+source "$HOME/esp/esp-idf/export.sh"
 ```
 
-Monitor only:
+Adjust the path if ESP-IDF is installed somewhere else.
+
+### 2. Clone the repository
 
 ```bash
-run chess monitor
+git clone https://github.com/Breno-Sanchez/electronic-chess.git
+cd electronic-chess
 ```
 
-Provision WPA2 Enterprise credentials locally:
+### 3. Select the ESP32-S3 target
 
 ```bash
-run chess provision
+idf.py set-target esp32s3
 ```
 
-The provisioning command asks for credentials locally, creates temporary NVS provisioning files, flashes the NVS partition, and avoids committing credentials to the repository.
+### 4. Build the firmware
+
+```bash
+idf.py build
+```
+
+### 5. Flash and monitor
+
+Connect the ESP32-S3 board over USB and select the correct serial port.
+
+Default Linux port used by this project:
+
+```bash
+idf.py -p /dev/ttyACM0 flash monitor
+```
+
+If the board appears on another port, replace `/dev/ttyACM0` with the detected port.
+
+Common examples:
+
+```bash
+idf.py -p /dev/ttyUSB0 flash monitor
+idf.py -p COM3 flash monitor
+```
+
+Press `Ctrl+]` to exit the ESP-IDF serial monitor.
+
+### 6. Open the web interface
+
+After flashing, connect a phone or computer to the board SoftAP:
+
+```text
+SSID: XADREZ_ESP
+Password: xadrez12345
+```
+
+Then open:
+
+```text
+http://192.168.4.1/
+```
+
+### Optional helper scripts
+
+The repository includes helper scripts under `scripts/`. They are optional and are mainly intended for local development convenience.
+
+Build using the project helper:
+
+```bash
+./scripts/run-chess.sh build
+```
+
+Build, flash, and monitor using the project helper:
+
+```bash
+./scripts/run-chess.sh
+```
+
+Provision WPA2 Enterprise credentials into NVS:
+
+```bash
+./scripts/run-chess.sh provision
+```
+
+The helper assumes the project's default serial port unless configured otherwise. The standard `idf.py` commands above are the generic way to build and run the project on any machine.
 
 ## Source layout
 
@@ -162,6 +229,7 @@ main/src/game      Game controller, HTTP API, web UI, state orchestration, and L
 main/src/net       Wi-Fi, credential provisioning, and StockfishOnline HTTP client
 main/src/tools     Firmware utility modes
 main/web/data      Embedded historical game data
+scripts            Optional local build, flash, monitor, and provisioning helpers
 ```
 
 ## Runtime configuration
@@ -172,7 +240,14 @@ Default configuration is stored in:
 main/config.yaml
 ```
 
-Runtime settings are stored in NVS and can be changed from the web Configuration tab.
+Runtime settings are stored in NVS and can be changed from the web Configuration tab. Typical runtime settings include LED brightness, LED colors, empty-square LEDs, StockfishOnline enable/disable, Stockfish depth, chess clock time, and chess clock increment.
+
+## Security notes
+
+- Do not commit real institutional Wi-Fi credentials.
+- Keep local credential artifacts out of Git.
+- The fixed SoftAP password is part of the project configuration, but WPA2 Enterprise STA credentials must be provisioned locally.
+- StockfishOnline is optional and can be disabled at runtime.
 
 ## License
 
